@@ -421,46 +421,105 @@ fun forcedVm(status: String, errorText: String?, statusText: String?, canScan: B
 // endregion
 
 // region my apps
-enum class MyAppsFilter(val label: String, val icon: String) { ALL("All", "fa-box-archive"), INSTALLED("Installed", "fa-circle-check"), DOWNLOADED("Downloaded", "fa-download"), UPDATES("Updates", "fa-arrow-up") }
+enum class MyAppsFilter(val label: String, val icon: String) {
+    ALL("All", "fa-box-archive"),
+    INSTALLED("Installed", "fa-circle-check"),
+    DOWNLOADED("Downloaded", "fa-download"),
+    UPDATES("Updates", "fa-arrow-up"),
+    PATCHED("Patched", "fa-puzzle-piece")
+}
 
 data class MyAppRow(
     val app: AppItem, val status: String, val installedVersion: String?, val lastRemoteVersion: String?, val readyFile: String?, val cleanupFile: String?,
     val libraryFile: String?, val downloadKey: String?, val hasSavedApk: Boolean, val hasUpdate: Boolean, val isInstalledNow: Boolean,
     val libraryStatus: String?, val progress: Float, val downloadedAt: Long, val installedAt: Long?,
+    val isPatched: Boolean = false,
+    val patchedApp: com.orion.store.morphe.model.PatchedApp? = null
 ) {
     val savedFile get() = readyFile ?: cleanupFile ?: libraryFile
     val primaryAction get() = when {
-        status == "downloading" -> "view"; status == "ready" -> "install"; hasUpdate -> "update"
+        status == "downloading" -> "view"; status == "ready" -> "install"
+        isPatched && hasUpdate -> "repatch"
+        hasUpdate -> "update"
         isInstalledNow && hasSavedApk -> "delete"; libraryStatus == "downloaded" -> if (hasSavedApk) "install" else "download"; else -> "view"
     }
     val statusLabel get() = when (status) {
-        "downloading" -> "${Math.round(progress)}%"; "ready" -> "Ready to install"; "update" -> "Update available"
-        "installed" -> if (isInstalledNow) "Installed v$installedVersion" else "Installed previously"
+        "downloading" -> "${Math.round(progress)}%"; "ready" -> "Ready to install"
+        "update" -> if (isPatched) "Patch update ready" else "Update available"
+        "installed" -> if (isPatched) "Patched v${patchedApp?.installedVersion ?: installedVersion}" else if (isInstalledNow) "Installed v$installedVersion" else "Installed previously"
         else -> if (hasSavedApk) "APK saved" else "Downloaded"
     }
     val versionDetail get() = when {
+        isPatched && hasUpdate -> "Repatch ready"
         hasUpdate -> preferredVersion(app).let { l -> if (installedVersion != null) "v$installedVersion → v$l" else "v$l" }
         installedVersion != null -> "v$installedVersion"; lastRemoteVersion != null -> "v$lastRemoteVersion"; else -> "Saved"
     }
 }
 
-fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: Set<String>): List<MyAppRow> = apps.mapNotNull { a ->
-    val lib = d.appLibrary[a.id]; val inst = s.installedVersions[a.id]?.ifEmpty { null }
-    val ready = d.readyToInstall[a.id]; val cleanup = d.pendingCleanup[a.id]; val key = d.activeDownloads[a.id]
-    val saved = ready != null || cleanup != null || lib?.fileName != null
-    val upd = a.id in updateIds; val dl = key != null; val now = inst != null
-    if (lib == null && !now && !saved && !dl && !upd) return@mapNotNull null
-    if (!dl && ready == null && !isManaged(a.id, s)) return@mapNotNull null
-    val status = when { dl -> "downloading"; ready != null -> "ready"; upd -> "update"; now || lib?.status == "installed" -> "installed"; else -> "downloaded" }
-    MyAppRow(a, status, inst, s.lastRemoteVersions[a.id], ready, cleanup?.fileName, lib?.fileName, key, saved, upd, now, lib?.status,
-        d.downloadProgress[a.id] ?: 0f, lib?.downloadedAt ?: cleanup?.timestamp ?: 0, lib?.installedAt)
-}.sortedByDescending { it.downloadedAt }
+fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: Set<String>): List<MyAppRow> {
+    val patchedList = com.orion.store.morphe.store.PatchedAppStore.apps.value
+    val baseRows = apps.mapNotNull { a ->
+        val lib = d.appLibrary[a.id]; val inst = s.installedVersions[a.id]?.ifEmpty { null }
+        val ready = d.readyToInstall[a.id]; val cleanup = d.pendingCleanup[a.id]; val key = d.activeDownloads[a.id]
+        val saved = ready != null || cleanup != null || lib?.fileName != null
+        val patched = patchedList.firstOrNull { it.packageName == a.packageName || it.packageName == a.id }
+        val isPatched = patched != null
+        val patchUpd = patched?.availableAppUpdate != null || patched?.availablePatchUpdate != null
+        val upd = a.id in updateIds || patchUpd; val dl = key != null; val now = inst != null || patched != null
+        if (lib == null && !now && !saved && !dl && !upd && !isPatched) return@mapNotNull null
+        if (!dl && ready == null && !isManaged(a.id, s) && !isPatched) return@mapNotNull null
+        val status = when { dl -> "downloading"; ready != null -> "ready"; upd -> "update"; now || lib?.status == "installed" -> "installed"; else -> "downloaded" }
+        MyAppRow(a, status, inst ?: patched?.installedVersion, s.lastRemoteVersions[a.id] ?: patched?.targetVersion, ready, cleanup?.fileName, lib?.fileName, key, saved, upd, now, lib?.status,
+            d.downloadProgress[a.id] ?: 0f, lib?.downloadedAt ?: cleanup?.timestamp ?: patched?.installedAt ?: 0, lib?.installedAt ?: patched?.installedAt,
+            isPatched = isPatched, patchedApp = patched)
+    }.toMutableList()
+
+    // Add any patched apps not in standard catalog
+    val existingIds = apps.map { it.id }.toSet()
+    for (p in patchedList) {
+        if (p.packageName !in existingIds && baseRows.none { it.app.packageName == p.packageName || it.app.id == p.packageName }) {
+            val fakeApp = AppItem(
+                id = p.packageName,
+                packageName = p.packageName,
+                name = p.appName,
+                category = "Patched",
+                author = "Morphe",
+                description = "Locally patched application (${p.appliedPatches.size} patches applied)."
+            )
+            val patchUpd = p.availableAppUpdate != null || p.availablePatchUpdate != null
+            baseRows.add(
+                MyAppRow(
+                    app = fakeApp,
+                    status = if (patchUpd) "update" else "installed",
+                    installedVersion = p.installedVersion,
+                    lastRemoteVersion = p.availableAppUpdate ?: p.targetVersion,
+                    readyFile = null,
+                    cleanupFile = null,
+                    libraryFile = null,
+                    downloadKey = null,
+                    hasSavedApk = false,
+                    hasUpdate = patchUpd,
+                    isInstalledNow = true,
+                    libraryStatus = "installed",
+                    progress = 0f,
+                    downloadedAt = p.installedAt,
+                    installedAt = p.installedAt,
+                    isPatched = true,
+                    patchedApp = p
+                )
+            )
+        }
+    }
+
+    return baseRows.sortedByDescending { it.downloadedAt }
+}
 
 fun myAppsFilterOrder(saved: List<String>) = saved.mapNotNull { n -> MyAppsFilter.entries.firstOrNull { it.name == n } }.distinct().let { it + (MyAppsFilter.entries - it.toSet()) }
 
 fun MyAppRow.matches(f: MyAppsFilter) = when (f) {
     MyAppsFilter.ALL -> true; MyAppsFilter.INSTALLED -> status == "installed" || hasUpdate
     MyAppsFilter.DOWNLOADED -> status in setOf("downloading", "ready", "downloaded"); MyAppsFilter.UPDATES -> hasUpdate
+    MyAppsFilter.PATCHED -> isPatched
 }
 
 fun MyAppRow.matchesQuery(q: String) = q.isBlank() || q.trim().lowercase().let { t -> listOfNotNull(app.name, app.author, app.category, app.packageName).any { t in it.lowercase() } }

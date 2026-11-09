@@ -17,11 +17,13 @@ data class NavConfigState(
         const val CURRENT_SCHEMA_VERSION = 1
         const val MINIMUM_VISIBLE_DESTINATIONS = 2
 
-        /** Default state populates all core and morphe destinations in default order */
+        /** Default state populates core destinations as visible; Morphe is integrated directly into Home and My Apps */
         fun defaultState(registry: List<NavDestination> = NavRegistry.all): NavConfigState {
             return NavConfigState(
                 schemaVersion = CURRENT_SCHEMA_VERSION,
-                items = registry.map { NavPillConfig(id = it.id, visible = true) }
+                items = registry.map { dest ->
+                    NavPillConfig(id = dest.id, visible = dest.group == NavGroup.CORE)
+                }
             )
         }
     }

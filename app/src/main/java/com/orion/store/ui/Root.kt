@@ -582,6 +582,9 @@ private fun Overlays(vm: MainViewModel) {
     vm.vtTarget?.let { VirusTotalSheet(vm, it) { vm.vtTarget = null } }
     if (vm.changeRequest) vm.selectedApp?.let { ChangeRequestSheet(vm, it) { vm.changeRequest = false } }
     vm.autoReport?.let { log -> AutoReportDialog(vm, log) }
+    vm.morpheInstallApp?.let { app ->
+        com.orion.store.morphe.ui.sheets.MorpheInstallSheet(vm, app) { vm.closeMorpheInstall() }
+    }
     if (vm.guidePrompt) GuidePromptDialog(vm)
     if (vm.verifierPrompt) VerifierDialog(vm)
     if (vm.verifierSetup) DirectInstallSheet(vm) { vm.verifierSetupClosed() }

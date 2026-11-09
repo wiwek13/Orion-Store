@@ -130,6 +130,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var cleanupPill by mutableStateOf(false)
     var bypassMaintenance by mutableStateOf(false)
     var startupReady by mutableStateOf(false)
+    // Morphe Community Store Integration
+    var isMorpheStoreActive by mutableStateOf(false)
+    var morpheCategory by mutableStateOf("All")
+    var morpheInstallApp by mutableStateOf<com.orion.store.morphe.store.MorpheCatalogApp?>(null)
+
+    fun toggleMorpheStore() {
+        isMorpheStoreActive = !isMorpheStoreActive
+        haptic(H.SELECTION)
+        if (isMorpheStoreActive && com.orion.store.morphe.store.MorpheCatalogRepository.apps.value.isEmpty()) {
+            viewModelScope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
+        }
+    }
+
+    fun selectMorpheCategory(cat: String) {
+        morpheCategory = cat
+        haptic(H.SELECTION)
+    }
+
+    fun openMorpheInstall(app: com.orion.store.morphe.store.MorpheCatalogApp) {
+        morpheInstallApp = app
+        haptic(H.LIGHT)
+    }
+
+    fun closeMorpheInstall() {
+        morpheInstallApp = null
+    }
+
     // Declared before init: on a fresh install the migration callback fires synchronously from init
     var migratedFromWeb by mutableStateOf(false)
     val ai = AiSession()

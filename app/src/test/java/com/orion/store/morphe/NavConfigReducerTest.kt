@@ -155,7 +155,7 @@ class NavConfigReducerTest {
 
     @Test
     fun testFeatureFlagGatingInResolveVisibleDestinations() {
-        val fullConfig = NavConfigState.defaultState()
+        val fullConfig = NavConfigState(items = NavRegistry.all.map { NavPillConfig(it.id, visible = true) })
 
         // When flag is OFF: only core destinations are resolved
         val coreOnly = resolveVisibleDestinations(fullConfig, morpheEnabled = false)
@@ -170,7 +170,7 @@ class NavConfigReducerTest {
 
     @Test
     fun testUserCanIndividuallyEnableAndDisableMorpheTabs() {
-        val fullConfig = NavConfigState.defaultState()
+        val fullConfig = NavConfigState(items = NavRegistry.all.map { NavPillConfig(it.id, visible = true) })
 
         // User disables patch_queue and patch_updates
         var state = reduceNavConfig(fullConfig, NavConfigAction.SetVisibility("patch_queue", false))

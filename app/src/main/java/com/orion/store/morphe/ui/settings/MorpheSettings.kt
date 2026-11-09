@@ -31,7 +31,9 @@ fun MorpheSettingsPage(
     val cs = MaterialTheme.colorScheme
     var confirmClearCache by remember { mutableStateOf(false) }
     var confirmResetRepos by remember { mutableStateOf(false) }
-    var showKeyDialog by remember { mutableStateOf(false) }
+    var keyInfo by remember { mutableStateOf(com.orion.store.morphe.store.KeyStoreManager.getActiveKeyInfo()) }
+    var showExportCert by remember { mutableStateOf(false) }
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
 
     Column(
         Modifier.fillMaxWidth().padding(16.dp),
@@ -147,14 +149,31 @@ fun MorpheSettingsPage(
                         Icon(Sym.Key, null, tint = cs.secondary)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("Android Keystore Key", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Text("Alias: morphe_default_key (RSA 2048)", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                            Text("Active Key: ${keyInfo.alias}", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text("Algorithm: ${keyInfo.algorithm} · SHA-256", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                            Text(
+                                "Fingerprint: ${keyInfo.fingerprintSha256}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = cs.onSurfaceVariant.copy(alpha = 0.8f),
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                            )
                         }
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        FilledTonalButton(onClick = { showKeyDialog = true }) {
-                            Text("Generate / Export")
+                        FilledTonalButton(onClick = {
+                            keyInfo = com.orion.store.morphe.store.KeyStoreManager.generateNewKey("morphe_custom_${System.currentTimeMillis() % 10000}")
+                            vm.haptic(H.SUCCESS)
+                        }) {
+                            Icon(Sym.Refresh, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Generate Key")
+                        }
+                        OutlinedButton(onClick = { showExportCert = true }) {
+                            Icon(Sym.FileDownload, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Export Cert")
                         }
                     }
                 }
@@ -218,13 +237,40 @@ fun MorpheSettingsPage(
         )
     }
 
-    if (showKeyDialog) {
+    if (showExportCert) {
+        val pem = remember(keyInfo) { com.orion.store.morphe.store.KeyStoreManager.getCertificatePem(keyInfo.alias) }
         AlertDialog(
-            onDismissRequest = { showKeyDialog = false },
-            title = { Text("APK Signing Keys") },
-            text = { Text("Key material is safely protected by hardware-backed Android Keystore and never saved in plaintext.") },
+            onDismissRequest = { showExportCert = false },
+            title = { Text("Public X.509 Certificate") },
+            text = {
+                Column {
+                    Text("Subject: ${keyInfo.subject.ifEmpty { "CN=Morphe Default" }}", style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(4.dp))
+                    Text("SHA-256 Fingerprint:\n${keyInfo.fingerprintSha256}", style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        Modifier.fillMaxWidth().heightIn(max = 180.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = cs.surfaceContainerLowest
+                    ) {
+                        Text(
+                            pem,
+                            modifier = Modifier.padding(8.dp),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                            fontSize = androidx.compose.ui.unit.TextUnit(10f, androidx.compose.ui.unit.TextUnitType.Sp)
+                        )
+                    }
+                }
+            },
             confirmButton = {
-                TextButton(onClick = { showKeyDialog = false }) { Text("Close") }
+                TextButton(onClick = {
+                    clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(pem))
+                    vm.haptic(H.SUCCESS)
+                    showExportCert = false
+                }) { Text("Copy PEM") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExportCert = false }) { Text("Close") }
             }
         )
     }

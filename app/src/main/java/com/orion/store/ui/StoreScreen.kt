@@ -68,8 +68,17 @@ fun StoreTab(vm: MainViewModel, platform: String, contentPadding: PaddingValues)
     val groups = remember(list, sort) { if (sort == SortOption.NAME_ASC || sort == SortOption.NAME_DESC) list.groupBy { initial(it.name) }.toList() else listOf("" to list) }
     val modernHome = vm.modernCollections()
     val grid = rememberLazyGridState(); val scope = rememberCoroutineScope()
+    val morpheApps by com.orion.store.morphe.store.MorpheCatalogRepository.apps.collectAsState()
+    val isMorpheSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
+    val filteredMorpheApps = remember(morpheApps, vm.morpheCategory, ts.query, vm.isMorpheStoreActive) {
+        if (!vm.isMorpheStoreActive) emptyList()
+        else morpheApps.filter { app ->
+            (vm.morpheCategory == "All" || app.category.equals(vm.morpheCategory, ignoreCase = true)) &&
+            (ts.query.isBlank() || app.name.contains(ts.query, ignoreCase = true) || app.packageName.contains(ts.query, ignoreCase = true) || app.category.contains(ts.query, ignoreCase = true))
+        }
+    }
     // Jump to top only when the filter actually changes, not when returning to a tab whose scroll was restored.
-    val view = "${ts.category}|${ts.sort}|${ts.filterFavorites}|${vm.showAllSorted}|${vm.expandedView}"
+    val view = "${ts.category}|${ts.sort}|${ts.filterFavorites}|${vm.showAllSorted}|${vm.expandedView}|${vm.isMorpheStoreActive}|${vm.morpheCategory}"
     var lastView by rememberSaveable { mutableStateOf(view) }
     LaunchedEffect(view) { if (view != lastView) { lastView = view; grid.scrollToItem(0) } }
     val ptr = rememberPullToRefreshState(); val wc = LocalWidthClass.current
@@ -77,13 +86,37 @@ fun StoreTab(vm: MainViewModel, platform: String, contentPadding: PaddingValues)
         // Classic rows become a card grid on medium and expanded windows: as many 320dp-or-wider columns as the store has room for
         val gridW = minOf(maxWidth, 1200.dp)
         val cols = if (!wc.wide) 1 else ((gridW - 32.dp + 12.dp) / (320.dp + 12.dp)).toInt().coerceAtLeast(1)
-        PullToRefreshBox(vm.refreshing, vm::reload, Modifier.fillMaxSize(), state = ptr,
-            indicator = { PtrIndicator(ptr, vm.refreshing, s.pullToRefreshCharacter, Modifier.align(Alignment.TopCenter)) }) {
+        val onReload: () -> Unit = {
+            if (vm.isMorpheStoreActive) {
+                scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
+            } else {
+                vm.reload()
+            }
+        }
+        PullToRefreshBox(if (vm.isMorpheStoreActive) isMorpheSyncing else vm.refreshing, onReload, Modifier.fillMaxSize(), state = ptr,
+            indicator = { PtrIndicator(ptr, if (vm.isMorpheStoreActive) isMorpheSyncing else vm.refreshing, s.pullToRefreshCharacter, Modifier.align(Alignment.TopCenter)) }) {
             LazyVerticalGrid(GridCells.Adaptive(if (s.compactMode) 78.dp else 100.dp), Modifier.fillMaxSize().wrapContentWidth().widthIn(max = 1200.dp), grid, contentPadding,
                 horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 item("header", span = full) { Header(vm) }
-                item("filters", span = full) { Filters(vm, ts, cats, visible.size, platform, modern) }
+                item("filters", span = full) { Filters(vm, ts, cats, if (vm.isMorpheStoreActive) filteredMorpheApps.size else visible.size, platform, modern) }
                 when {
+                    vm.isMorpheStoreActive -> {
+                        if (isMorpheSyncing && morpheApps.isEmpty()) {
+                            item("morphe_loading", span = full) { StoreSkeleton(modern) }
+                        } else if (filteredMorpheApps.isEmpty()) {
+                            item("morphe_empty", span = full) {
+                                EmptyState(
+                                    Sym.Extension,
+                                    "No Morphe apps found",
+                                    "Pull down or tap refresh to sync community patches from https://morphe-patches.software"
+                                )
+                            }
+                        } else {
+                            itemsIndexed(filteredMorpheApps, key = { _, app -> "morphe-" + app.packageName }, span = { _, _ -> GridItemSpan(maxLineSpan) }) { i, app ->
+                                MorpheAppRow(vm, app, i, filteredMorpheApps.size)
+                            }
+                        }
+                    }
                     vm.loading || !vm.tabReady -> item("loading", span = full) { StoreSkeleton(modern) }
                     list.isEmpty() -> item("empty", span = full) {
                         EmptyState(if (ts.filterFavorites) Sym.HeartBroken else Sym.SearchOff, if (ts.filterFavorites) "No favorites found" else "No $platform apps found",
@@ -137,7 +170,10 @@ private fun MoreButton(label: String, onClick: () -> Unit) = Box(Modifier.fillMa
 @Composable
 private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, count: Int, platform: String, modern: Boolean) {
     val cs = MaterialTheme.colorScheme
-    val filtered = ts.category != "All" || ts.query.isNotEmpty()
+    val filtered = if (vm.isMorpheStoreActive) vm.morpheCategory != "All" || ts.query.isNotEmpty() else ts.category != "All" || ts.query.isNotEmpty()
+    val morpheCats by com.orion.store.morphe.store.MorpheCatalogRepository.categories.collectAsState()
+    val effectiveCats = if (vm.isMorpheStoreActive) morpheCats else cats
+
     Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             item("sort") { SortButton(vm, if (modern) MODERN_SORTS else CLASSIC_SORTS) }
@@ -146,26 +182,78 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
                     Icon(if (ts.filterFavorites) Sym.Favorite else Sym.FavoriteBorder, "Show Favorites")
                 }
             }
-            if (cats.isNotEmpty()) item("div") { VerticalDivider(Modifier.height(28.dp).padding(horizontal = 4.dp), color = cs.outlineVariant) }
-            items(cats, key = { it }) { c ->
-                val home = modern && c == "All"
-                Choice(ts.category == c, if (home) "Home" else c, if (home) (if (ts.category == c) Sym.HomeFilled else Sym.Home) else null) {
-                    if (home) vm.restoreBrowse() else vm.filterCategory(c)
+            if (vm.s.morpheEnabled) {
+                item("morphe_store_toggle") {
+                    FilledTonalIconToggleButton(
+                        checked = vm.isMorpheStoreActive,
+                        onCheckedChange = { vm.toggleMorpheStore() },
+                        shapes = IconButtonDefaults.toggleableShapes()
+                    ) {
+                        Icon(
+                            Sym.Extension,
+                            "Morphe Patches Store (morphe-patches.software)",
+                            tint = if (vm.isMorpheStoreActive) cs.primary else cs.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+            if (effectiveCats.isNotEmpty()) item("div") { VerticalDivider(Modifier.height(28.dp).padding(horizontal = 4.dp), color = cs.outlineVariant) }
+            items(effectiveCats, key = { it }) { c ->
+                val active = if (vm.isMorpheStoreActive) vm.morpheCategory == c else ts.category == c
+                val home = !vm.isMorpheStoreActive && modern && c == "All"
+                Choice(active, if (home) "Home" else c, if (home) (if (active) Sym.HomeFilled else Sym.Home) else null) {
+                    if (vm.isMorpheStoreActive) {
+                        vm.selectMorpheCategory(c)
+                    } else {
+                        if (home) vm.restoreBrowse() else vm.filterCategory(c)
+                    }
                 }
             }
         }
         Row(Modifier.padding(start = 20.dp, end = 12.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                if (modern && filtered) Text(if (ts.category == "All") "Search results" else ts.category, style = MaterialTheme.typography.headlineSmallEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("$count apps · " + (if (ts.query.isNotEmpty()) "“${ts.query}”" else vm.sortControl.label), style = MaterialTheme.typography.labelLarge,
-                    color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (vm.isMorpheStoreActive) {
+                    Text(
+                        if (vm.morpheCategory == "All") "Morphe Community Patches" else vm.morpheCategory,
+                        style = MaterialTheme.typography.headlineSmallEmphasized,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        "$count apps · morphe-patches.software",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = cs.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else {
+                    if (modern && filtered) Text(if (ts.category == "All") "Search results" else ts.category, style = MaterialTheme.typography.headlineSmallEmphasized, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text("$count apps · " + (if (ts.query.isNotEmpty()) "“${ts.query}”" else vm.sortControl.label), style = MaterialTheme.typography.labelLarge,
+                        color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             // TV remotes cannot pull to refresh, so the button shows on modern too
-            if (!modern || Device.isTv) IconButton(vm::reload, enabled = !vm.refreshing) { if (vm.refreshing) LoadingIndicator(Modifier.size(24.dp)) else Icon(Sym.Refresh, "Refresh") }
-            vm.submissionCooldown?.let { AssistChip({}, { Text(it) }, leadingIcon = { Icon(Sym.Schedule, null, Modifier.size(16.dp)) }, enabled = false) }
-                ?: TextButton({ vm.open(Overlay.SUBMISSION) }, shapes = ButtonDefaults.shapes()) {
-                    Icon(Sym.AddCircleOutline, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Submit app")
-                }
+            val isSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
+            val refreshing = if (vm.isMorpheStoreActive) isSyncing else vm.refreshing
+            val scope = rememberCoroutineScope()
+            IconButton(
+                onClick = {
+                    if (vm.isMorpheStoreActive) {
+                        scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
+                    } else {
+                        vm.reload()
+                    }
+                },
+                enabled = !refreshing
+            ) {
+                if (refreshing) LoadingIndicator(Modifier.size(24.dp)) else Icon(Sym.Refresh, "Refresh")
+            }
+            if (!vm.isMorpheStoreActive) {
+                vm.submissionCooldown?.let { AssistChip({}, { Text(it) }, leadingIcon = { Icon(Sym.Schedule, null, Modifier.size(16.dp)) }, enabled = false) }
+                    ?: TextButton({ vm.open(Overlay.SUBMISSION) }, shapes = ButtonDefaults.shapes()) {
+                        Icon(Sym.AddCircleOutline, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Submit app")
+                    }
+            }
         }
     }
 }
@@ -654,5 +742,121 @@ private fun Bundles(vm: MainViewModel, c: StoreCollection, modifier: Modifier) =
             }
         }
     }
+    }
+}
+
+
+@Composable
+fun MorpheAppRow(
+    vm: MainViewModel,
+    app: com.orion.store.morphe.store.MorpheCatalogApp,
+    index: Int = 0,
+    count: Int = 1,
+    modifier: Modifier = Modifier,
+    inset: Dp = 16.dp
+) {
+    val s = LocalS.current
+    val compact = s.compactMode
+    val cs = MaterialTheme.colorScheme
+    val src = remember { MutableInteractionSource() }
+    val shapes = ListItemDefaults.segmentedShapes(index, count)
+
+    SegmentedListItem(
+        onClick = {
+            vm.haptic(H.SELECTION)
+            vm.openMorpheInstall(app)
+        },
+        shapes = shapes,
+        modifier = modifier
+            .padding(horizontal = inset)
+            .focusRing(src, shapes.shape)
+            .then(if (compact) CompactRowHeight else Modifier),
+        leadingContent = {
+            if (app.iconUrl.isNotEmpty()) {
+                coil3.compose.AsyncImage(
+                    model = app.iconUrl,
+                    contentDescription = app.name,
+                    modifier = Modifier
+                        .size(if (compact) 44.dp else 52.dp)
+                        .clip(RoundedCornerShape(14.dp)),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Box(
+                    Modifier
+                        .size(if (compact) 44.dp else 52.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(cs.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Sym.Android, null, tint = cs.onPrimaryContainer)
+                }
+            }
+        },
+        trailingContent = {
+            FilledTonalButton(
+                onClick = {
+                    vm.haptic(H.LIGHT)
+                    vm.openMorpheInstall(app)
+                },
+                shapes = ButtonDefaults.shapes(),
+                contentPadding = ButtonDefaults.SmallContentPadding
+            ) {
+                Icon(Sym.Build, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(if (app.patchCount > 0) "Patch (${app.patchCount})" else "Install")
+            }
+        },
+        overlineContent = if (compact) null else ({
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Sym.Extension, null, Modifier.size(14.dp), tint = cs.primary)
+                Spacer(Modifier.width(4.dp))
+                Text(app.category, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }),
+        supportingContent = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (app.patchCount > 0) {
+                        Text(
+                            "${app.patchCount} patches available",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            color = cs.primary
+                        )
+                    } else {
+                        Text(
+                            "Universal patches available",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant
+                        )
+                    }
+                    if (app.compatibleVersions.isNotEmpty()) {
+                        Text(
+                            " · Target v${app.compatibleVersions.first()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant
+                        )
+                    }
+                }
+                if (!compact && s.showAppAbout && app.description.isNotEmpty()) {
+                    AboutPreview(app.description)
+                }
+            }
+        },
+        colors = ListItemDefaults.segmentedColors(containerColor = cs.surfaceContainer),
+        contentPadding = if (compact) CompactRowPadding else ListItemDefaults.ContentPadding,
+        verticalAlignment = Alignment.CenterVertically,
+        interactionSource = src
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                app.name,
+                Modifier.weight(1f, false),
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }

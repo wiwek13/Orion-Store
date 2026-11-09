@@ -36,8 +36,15 @@ private val Sky = Color(0xFF0EA5E9)
 private fun filterIcon(f: MyAppsFilter) = when (f) {
     MyAppsFilter.ALL -> Sym.Inventory2; MyAppsFilter.INSTALLED -> Sym.CheckCircle
     MyAppsFilter.DOWNLOADED -> Sym.Download; MyAppsFilter.UPDATES -> Sym.ArrowUpward
+    MyAppsFilter.PATCHED -> Sym.Extension
 }
-private val EMPTY = mapOf(MyAppsFilter.ALL to "No apps yet", MyAppsFilter.INSTALLED to "No installed apps", MyAppsFilter.DOWNLOADED to "No downloaded apps", MyAppsFilter.UPDATES to "No pending updates")
+private val EMPTY = mapOf(
+    MyAppsFilter.ALL to "No apps yet",
+    MyAppsFilter.INSTALLED to "No installed apps",
+    MyAppsFilter.DOWNLOADED to "No downloaded apps",
+    MyAppsFilter.UPDATES to "No pending updates",
+    MyAppsFilter.PATCHED to "No patched apps yet"
+)
 
 @Composable
 private fun tone(r: MyAppRow): Pair<ImageVector, Color> = when {
@@ -203,7 +210,15 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             }
             Spacer(Modifier.width(if (compact) 12.dp else 16.dp))
             Column(Modifier.weight(1f)) {
-                Text(r.app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(r.app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    if (r.isPatched) {
+                        Spacer(Modifier.width(6.dp))
+                        Badge(containerColor = cs.tertiaryContainer, contentColor = cs.onTertiaryContainer) {
+                            Text("Patched")
+                        }
+                    }
+                }
                 if (!compact) Text("${r.app.author} · ${r.app.platform} · ${r.versionDetail}", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(icon, null, Modifier.size(14.dp), tint = c); Spacer(Modifier.width(4.dp))
@@ -217,6 +232,11 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             when {
                 r.status == "downloading" -> FilledTonalIconButton({ vm.cancelDownload(r.app.id) }, shapes = IconButtonDefaults.shapes()) { Icon(Sym.Close, "Cancel download") }
                 action == "install" -> Primary("Install") { r.savedFile?.let { vm.installFile(r.app, it) } }
+                action == "repatch" -> Primary("Repatch") {
+                    val pkg = r.app.packageName ?: r.app.id
+                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = pkg, name = r.app.name)
+                    vm.openMorpheInstall(morpheApp)
+                }
                 action == "update" -> Primary("Update") { vm.download(r.app) }
                 action == "download" -> Primary("Download") { vm.download(r.app) }
                 action == "delete" -> IconButton({ vm.deleteLibraryApk(r.app) }) { Icon(Sym.DeleteOutline, "Delete APK") }
@@ -229,6 +249,12 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                     val pkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName
                     if (pkg != null) DropdownMenuItem({ Text("Open") }, { menu = false; runCatching { vm.tracker.launch(pkg) }.onFailure { vm.error("Could not launch app. It may be restricted.") } },
                         leadingIcon = { Icon(Sym.OpenInNew, null) })
+                    DropdownMenuItem({ Text("Patch / Repatch") }, {
+                        menu = false
+                        val p = pkg ?: r.app.id
+                        val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
+                        vm.openMorpheInstall(morpheApp)
+                    }, leadingIcon = { Icon(Sym.Build, null) })
                     DropdownMenuItem({ Text("Uninstall") }, { menu = false; vm.uninstall(r.app) }, leadingIcon = { Icon(Sym.Delete, null) })
                 }
             }

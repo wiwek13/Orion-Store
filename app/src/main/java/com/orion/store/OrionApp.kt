@@ -13,8 +13,14 @@ import com.orion.store.ui.Store
 import java.util.concurrent.TimeUnit
 
 class OrionApp : Application(), SingletonImageLoader.Factory {
+    companion object {
+        lateinit var instance: OrionApp
+            private set
+    }
+
     override fun onCreate() {
         super.onCreate()
+        instance = this
         // Before anything can read them: after process death Android restores the activity with saved state, which skips
         // the code path that used to create them, and the first settings read on start crashed the launch
         Store.init(this); com.orion.store.platform.Downloads.attach(this)

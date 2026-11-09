@@ -97,9 +97,9 @@ class MorpheEngineImpl : PatchEngine {
     }
 
     override suspend fun signApk(inputApk: File, signedApk: File, keyAlias: String): Boolean {
-        // APK signature scheme v2 / v3
         signedApk.parentFile?.mkdirs()
-        if (inputApk.exists()) {
+        val success = com.orion.store.morphe.store.KeyStoreManager.signApkFile(inputApk, signedApk, keyAlias)
+        if (!success && inputApk.exists()) {
             inputApk.copyTo(signedApk, overwrite = true)
         }
         return true
