@@ -36,7 +36,7 @@ fun MorpheSettingsPage(
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
 
     Column(
-        Modifier.fillMaxWidth().padding(16.dp),
+        Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Master Feature Flag Toggle
@@ -71,7 +71,7 @@ fun MorpheSettingsPage(
             // Navigation Customization Shortcut
             Surface(
                 Modifier.fillMaxWidth().clickable { onNavigateToNavCustomize() },
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = cs.tertiaryContainer
             ) {
                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -89,7 +89,7 @@ fun MorpheSettingsPage(
             Text("Patching Engine", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(
                 Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = cs.surfaceContainerHigh
             ) {
                 Column(Modifier.padding(16.dp)) {
@@ -111,7 +111,7 @@ fun MorpheSettingsPage(
             Text("Community Repositories", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(
                 Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = cs.surfaceContainerHigh
             ) {
                 Column(Modifier.padding(16.dp)) {
@@ -125,10 +125,10 @@ fun MorpheSettingsPage(
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { confirmResetRepos = true }) {
+                        TextButton(onClick = { confirmResetRepos = true }, shapes = ButtonDefaults.shapes()) {
                             Text("Reset to Default")
                         }
-                        FilledTonalButton(onClick = { /* Add repo modal */ }) {
+                        FilledTonalButton(onClick = { /* Add repo modal */ }, shapes = ButtonDefaults.shapes()) {
                             Icon(Sym.Add, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("Add Repository")
@@ -141,7 +141,7 @@ fun MorpheSettingsPage(
             Text("Signing Keys (Keystore)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(
                 Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = cs.surfaceContainerHigh
             ) {
                 Column(Modifier.padding(16.dp)) {
@@ -165,12 +165,12 @@ fun MorpheSettingsPage(
                         FilledTonalButton(onClick = {
                             keyInfo = com.orion.store.morphe.store.KeyStoreManager.generateNewKey("morphe_custom_${System.currentTimeMillis() % 10000}")
                             vm.haptic(H.SUCCESS)
-                        }) {
+                        }, shapes = ButtonDefaults.shapes()) {
                             Icon(Sym.Refresh, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("Generate Key")
                         }
-                        OutlinedButton(onClick = { showExportCert = true }) {
+                        FilledTonalButton(onClick = { showExportCert = true }, shapes = ButtonDefaults.shapes()) {
                             Icon(Sym.FileDownload, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text("Export Cert")
@@ -183,7 +183,7 @@ fun MorpheSettingsPage(
             Text("Storage & Cache", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(
                 Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(18.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = cs.surfaceContainerHigh
             ) {
                 Row(
@@ -194,7 +194,7 @@ fun MorpheSettingsPage(
                         Text("Clear Patch Cache", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                         Text("Remove intermediate dex, align, and temporary files", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                     }
-                    OutlinedButton(onClick = { confirmClearCache = true }) {
+                    FilledTonalButton(onClick = { confirmClearCache = true }, shapes = ButtonDefaults.shapes()) {
                         Text("Clear")
                     }
                 }

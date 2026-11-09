@@ -219,7 +219,14 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                         }
                     }
                 }
-                if (!compact) Text("${r.app.author} · ${r.app.platform} · ${r.versionDetail}", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!compact) {
+                    val subtitle = listOfNotNull(
+                        r.app.author.takeIf { it.isNotBlank() },
+                        r.app.platform.takeIf { it.isNotBlank() },
+                        r.versionDetail.takeIf { it.isNotBlank() }
+                    ).joinToString(" · ")
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(icon, null, Modifier.size(14.dp), tint = c); Spacer(Modifier.width(4.dp))
                     Text(r.statusLabel, style = MaterialTheme.typography.labelMedium, color = c, maxLines = 1)

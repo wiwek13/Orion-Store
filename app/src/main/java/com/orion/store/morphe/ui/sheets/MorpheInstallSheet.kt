@@ -54,6 +54,7 @@ fun MorpheInstallSheet(
 
     val installedVersion = vm.s.installedVersions[app.packageName]
     val recommendedVersion = app.compatibleVersions.firstOrNull() ?: installedVersion ?: "Latest"
+    var showAllUniversal by remember { mutableStateOf(false) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -72,25 +73,12 @@ fun MorpheInstallSheet(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                if (app.iconUrl.isNotEmpty()) {
-                    AsyncImage(
-                        model = app.iconUrl,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .size(54.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                    )
-                } else {
-                    Box(
-                        Modifier
-                            .size(54.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(cs.primaryContainer),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Sym.Android, null, tint = cs.onPrimaryContainer)
-                    }
-                }
+                com.orion.store.ui.RemoteIcon(
+                    url = app.iconUrl,
+                    name = app.name,
+                    size = 54.dp,
+                    shape = RoundedCornerShape(14.dp)
+                )
 
                 Spacer(Modifier.width(14.dp))
 
@@ -207,28 +195,45 @@ fun MorpheInstallSheet(
                 // Section: Universal Patches
                 if (universalPatches.isNotEmpty()) {
                     item {
-                        Text(
-                            "Universal Patches (${universalPatches.size})",
-                            modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.secondary
-                        )
-                    }
-
-                    items(universalPatches.take(20), key = { "univ-${it.name}" }) { patch ->
-                        PatchRow(
-                            patch = patch,
-                            isSelected = selectedPatches.contains(patch.name),
-                            onToggle = {
-                                if (selectedPatches.contains(patch.name)) {
-                                    selectedPatches.remove(patch.name)
-                                } else {
-                                    selectedPatches.add(patch.name)
+                        Column {
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 16.dp, bottom = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Universal Patches (${universalPatches.size})",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = cs.secondary
+                                )
+                                if (universalPatches.size > 5) {
+                                    TextButton(
+                                        onClick = { showAllUniversal = !showAllUniversal },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(if (showAllUniversal) "Show less" else "Show all (${universalPatches.size})")
+                                    }
                                 }
-                                vm.haptic(H.SELECTION)
                             }
-                        )
+                            val displayed = if (showAllUniversal) universalPatches else universalPatches.take(5)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                displayed.forEach { patch ->
+                                    PatchRow(
+                                        patch = patch,
+                                        isSelected = selectedPatches.contains(patch.name),
+                                        onToggle = {
+                                            if (selectedPatches.contains(patch.name)) {
+                                                selectedPatches.remove(patch.name)
+                                            } else {
+                                                selectedPatches.add(patch.name)
+                                            }
+                                            vm.haptic(H.SELECTION)
+                                        }
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -267,7 +272,7 @@ fun MorpheInstallSheet(
                         }
                     },
                     enabled = selectedPatches.isNotEmpty(),
-                    shape = RoundedCornerShape(16.dp)
+                    shapes = ButtonDefaults.shapes()
                 ) {
                     Icon(Sym.Build, null, Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
@@ -285,15 +290,17 @@ private fun PatchRow(
     onToggle: () -> Unit
 ) {
     val cs = MaterialTheme.colorScheme
+    val borderStroke = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, cs.primary.copy(alpha = 0.5f)) else null
     Surface(
         Modifier
             .fillMaxWidth()
             .clickable { onToggle() },
-        shape = RoundedCornerShape(12.dp),
-        color = if (isSelected) cs.surfaceContainerHighest else cs.surfaceContainerHigh
+        shape = RoundedCornerShape(14.dp),
+        color = if (isSelected) cs.surfaceContainerHighest else cs.surfaceContainer,
+        border = borderStroke
     ) {
         Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Checkbox(

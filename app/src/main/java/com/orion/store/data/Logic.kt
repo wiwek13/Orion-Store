@@ -444,15 +444,24 @@ data class MyAppRow(
         isInstalledNow && hasSavedApk -> "delete"; libraryStatus == "downloaded" -> if (hasSavedApk) "install" else "download"; else -> "view"
     }
     val statusLabel get() = when (status) {
-        "downloading" -> "${Math.round(progress)}%"; "ready" -> "Ready to install"
-        "update" -> if (isPatched) "Patch update ready" else "Update available"
-        "installed" -> if (isPatched) "Patched v${patchedApp?.installedVersion ?: installedVersion}" else if (isInstalledNow) "Installed v$installedVersion" else "Installed previously"
+        "downloading" -> "${Math.round(progress)}%"
+        "ready" -> "Ready to install"
+        "update" -> if (isPatched) "Patch update available" else "Update available"
+        "installed" -> if (isPatched) {
+            val count = patchedApp?.appliedPatches?.size ?: 0
+            if (count > 0) "Patched ($count patches)" else "Patched"
+        } else if (isInstalledNow) "Installed v$installedVersion" else "Installed previously"
         else -> if (hasSavedApk) "APK saved" else "Downloaded"
     }
     val versionDetail get() = when {
-        isPatched && hasUpdate -> "Repatch ready"
+        isPatched && hasUpdate -> {
+            val next = lastRemoteVersion ?: patchedApp?.availableAppUpdate ?: preferredVersion(app)
+            if (installedVersion != null && next.isNotEmpty()) "v$installedVersion → v$next" else "v$next"
+        }
         hasUpdate -> preferredVersion(app).let { l -> if (installedVersion != null) "v$installedVersion → v$l" else "v$l" }
-        installedVersion != null -> "v$installedVersion"; lastRemoteVersion != null -> "v$lastRemoteVersion"; else -> "Saved"
+        installedVersion != null -> "v$installedVersion"
+        lastRemoteVersion != null -> "v$lastRemoteVersion"
+        else -> "Saved"
     }
 }
 
@@ -478,11 +487,13 @@ fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: S
     val existingIds = apps.map { it.id }.toSet()
     for (p in patchedList) {
         if (p.packageName !in existingIds && baseRows.none { it.app.packageName == p.packageName || it.app.id == p.packageName }) {
+            val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p.packageName)
             val fakeApp = AppItem(
                 id = p.packageName,
                 packageName = p.packageName,
                 name = p.appName,
-                category = "Patched",
+                icon = morpheApp?.iconUrl.orEmpty(),
+                category = morpheApp?.category ?: "Patched",
                 author = "Morphe",
                 description = "Locally patched application (${p.appliedPatches.size} patches applied)."
             )

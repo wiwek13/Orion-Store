@@ -366,7 +366,7 @@ private fun OrionMessage(data: SnackbarData) {
 private fun NavIcon(n: NavItem, on: Boolean, updates: Int) {
     val k = remember { Animatable(1f) }; val spec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
     LaunchedEffect(on) { if (on) { k.snapTo(.7f); k.animateTo(1f, spec) } }
-    val icon = @Composable { Icon(if (on) n.selected else n.icon, n.label, Modifier.graphicsLayer { scaleX = k.value; scaleY = k.value }) }
+    val icon = @Composable { Icon(if (on) n.selected else n.icon, null, Modifier.graphicsLayer { scaleX = k.value; scaleY = k.value }) }
 
     val queueCount by JobStore.activeCount.collectAsStateWithLifecycle()
     val attentionCount by PatchedAppStore.attentionCount.collectAsStateWithLifecycle()

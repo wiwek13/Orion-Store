@@ -189,11 +189,7 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
                         onCheckedChange = { vm.toggleMorpheStore() },
                         shapes = IconButtonDefaults.toggleableShapes()
                     ) {
-                        Icon(
-                            Sym.Extension,
-                            "Morphe Patches Store (morphe-patches.software)",
-                            tint = if (vm.isMorpheStoreActive) cs.primary else cs.onSurfaceVariant
-                        )
+                        Icon(Sym.Extension, "Morphe Patches Store")
                     }
                 }
             }
@@ -201,7 +197,14 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
             items(effectiveCats, key = { it }) { c ->
                 val active = if (vm.isMorpheStoreActive) vm.morpheCategory == c else ts.category == c
                 val home = !vm.isMorpheStoreActive && modern && c == "All"
-                Choice(active, if (home) "Home" else c, if (home) (if (active) Sym.HomeFilled else Sym.Home) else null) {
+                val isMorpheAll = vm.isMorpheStoreActive && c == "All"
+                val label = if (home) "Home" else c
+                val icon = when {
+                    home -> if (active) Sym.HomeFilled else Sym.Home
+                    isMorpheAll -> Sym.Extension
+                    else -> null
+                }
+                Choice(active, label, icon) {
                     if (vm.isMorpheStoreActive) {
                         vm.selectMorpheCategory(c)
                     } else {
@@ -213,12 +216,14 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
         Row(Modifier.padding(start = 20.dp, end = 12.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 if (vm.isMorpheStoreActive) {
-                    Text(
-                        if (vm.morpheCategory == "All") "Morphe Community Patches" else vm.morpheCategory,
-                        style = MaterialTheme.typography.headlineSmallEmphasized,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    if (vm.morpheCategory != "All" || ts.query.isNotEmpty()) {
+                        Text(
+                            if (ts.query.isNotEmpty()) "Search results" else vm.morpheCategory,
+                            style = MaterialTheme.typography.headlineSmallEmphasized,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     Text(
                         "$count apps · morphe-patches.software",
                         style = MaterialTheme.typography.labelLarge,
@@ -236,17 +241,19 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
             val isSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
             val refreshing = if (vm.isMorpheStoreActive) isSyncing else vm.refreshing
             val scope = rememberCoroutineScope()
-            IconButton(
-                onClick = {
-                    if (vm.isMorpheStoreActive) {
-                        scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
-                    } else {
-                        vm.reload()
-                    }
-                },
-                enabled = !refreshing
-            ) {
-                if (refreshing) LoadingIndicator(Modifier.size(24.dp)) else Icon(Sym.Refresh, "Refresh")
+            if (!modern || Device.isTv) {
+                IconButton(
+                    onClick = {
+                        if (vm.isMorpheStoreActive) {
+                            scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
+                        } else {
+                            vm.reload()
+                        }
+                    },
+                    enabled = !refreshing
+                ) {
+                    if (refreshing) LoadingIndicator(Modifier.size(24.dp)) else Icon(Sym.Refresh, "Refresh")
+                }
             }
             if (!vm.isMorpheStoreActive) {
                 vm.submissionCooldown?.let { AssistChip({}, { Text(it) }, leadingIcon = { Icon(Sym.Schedule, null, Modifier.size(16.dp)) }, enabled = false) }
@@ -747,6 +754,22 @@ private fun Bundles(vm: MainViewModel, c: StoreCollection, modifier: Modifier) =
 
 
 @Composable
+private fun MorpheBlob(patchCount: Int, src: MutableInteractionSource) {
+    val cs = MaterialTheme.colorScheme
+    val pressed by src.collectIsPressedAsState()
+    val k by animateFloatAsState(if (pressed) 1f else 0f, MaterialTheme.motionScheme.fastSpatialSpec(), label = "mblob")
+    val shape = if (patchCount > 0) MaterialShapes.Cookie7Sided else MaterialShapes.Cookie6Sided
+    val morph = remember(shape) { Morph(shape, MaterialShapes.Circle) }
+    val bg = if (patchCount > 0) cs.primaryContainer else cs.surfaceContainerHighest
+    val fg = if (patchCount > 0) cs.onPrimaryContainer else cs.onSurfaceVariant
+    val icon = if (patchCount > 0) Sym.Build else Sym.Extension
+    Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+        Box(Modifier.matchParentSize().graphicsLayer { rotationZ = k * 45f }.background(bg, MorphShape(morph, k)))
+        Icon(icon, null, Modifier.size(20.dp), tint = fg)
+    }
+}
+
+@Composable
 fun MorpheAppRow(
     vm: MainViewModel,
     app: com.orion.store.morphe.store.MorpheCatalogApp,
@@ -772,44 +795,14 @@ fun MorpheAppRow(
             .focusRing(src, shapes.shape)
             .then(if (compact) CompactRowHeight else Modifier),
         leadingContent = {
-            if (app.iconUrl.isNotEmpty()) {
-                coil3.compose.AsyncImage(
-                    model = app.iconUrl,
-                    contentDescription = app.name,
-                    modifier = Modifier
-                        .size(if (compact) 44.dp else 52.dp)
-                        .clip(RoundedCornerShape(14.dp)),
-                    contentScale = ContentScale.Crop
-                )
-            } else {
-                Box(
-                    Modifier
-                        .size(if (compact) 44.dp else 52.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(cs.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(Sym.Android, null, tint = cs.onPrimaryContainer)
-                }
-            }
+            RemoteIcon(app.iconUrl, app.name, if (compact) 44.dp else 52.dp)
         },
         trailingContent = {
-            FilledTonalButton(
-                onClick = {
-                    vm.haptic(H.LIGHT)
-                    vm.openMorpheInstall(app)
-                },
-                shapes = ButtonDefaults.shapes(),
-                contentPadding = ButtonDefaults.SmallContentPadding
-            ) {
-                Icon(Sym.Build, null, Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text(if (app.patchCount > 0) "Patch (${app.patchCount})" else "Install")
-            }
+            MorpheBlob(app.patchCount, src)
         },
         overlineContent = if (compact) null else ({
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Sym.Extension, null, Modifier.size(14.dp), tint = cs.primary)
+                Icon(categoryIcon(app.category), null, Modifier.size(14.dp), tint = cs.primary)
                 Spacer(Modifier.width(4.dp))
                 Text(app.category, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -817,27 +810,20 @@ fun MorpheAppRow(
         supportingContent = {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (app.patchCount > 0) {
-                        Text(
-                            "${app.patchCount} patches available",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            color = cs.primary
-                        )
-                    } else {
-                        Text(
-                            "Universal patches available",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = cs.onSurfaceVariant
-                        )
+                    if (compact) {
+                        Icon(categoryIcon(app.category), app.category, Modifier.size(14.dp), tint = cs.primary)
+                        Spacer(Modifier.width(4.dp))
                     }
-                    if (app.compatibleVersions.isNotEmpty()) {
-                        Text(
-                            " · Target v${app.compatibleVersions.first()}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = cs.onSurfaceVariant
-                        )
-                    }
+                    val patchText = if (app.patchCount > 0) "${app.patchCount} patches available" else "Universal patches"
+                    val targetText = if (app.compatibleVersions.isNotEmpty()) " · Target v${app.compatibleVersions.first()}" else ""
+                    Text(
+                        patchText + targetText,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (app.patchCount > 0) cs.primary else cs.onSurfaceVariant,
+                        fontWeight = if (app.patchCount > 0) FontWeight.Medium else null,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
                 if (!compact && s.showAppAbout && app.description.isNotEmpty()) {
                     AboutPreview(app.description)
