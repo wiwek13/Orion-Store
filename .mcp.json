@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "pinky": {
-      "command": "pinkyctl",
+      "command": "/Applications/Pinky.app/Contents/MacOS/Pinky",
       "args": [
         "mcp"
       ]
