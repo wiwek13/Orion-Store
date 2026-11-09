@@ -109,6 +109,32 @@ fun NavCustomizeScreen(
             }
         }
 
+        // Morphe Ecosystem Toggle
+        Surface(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            shape = RoundedCornerShape(18.dp),
+            color = if (s.morpheEnabled) cs.primaryContainer else cs.surfaceContainerHigh
+        ) {
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Enable Morphe Ecosystem", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text("Adds Morphe Store, Studio, My Patched Apps, Queue & Updates", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                }
+                Switch(
+                    checked = s.morpheEnabled,
+                    onCheckedChange = {
+                        vm.haptic(H.SELECTION)
+                        vm.set { it.copy(morpheEnabled = !it.morpheEnabled) }
+                    }
+                )
+            }
+        }
+
         // Pill list
         LazyColumn(
             Modifier.fillMaxWidth().weight(1f),

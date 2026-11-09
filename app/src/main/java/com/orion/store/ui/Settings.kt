@@ -770,6 +770,7 @@ private fun Hub(vm: MainViewModel, s: Settings, d: DataState, active: Int, ready
                 Slot(5, Modifier.weight(1f).fillMaxHeight(), compact = true)
                 Slot(6, Modifier.weight(1f).fillMaxHeight(), compact = true)
             }
+            Bento(vm, cat("morphe"), shared, Modifier.fillMaxWidth().height(120.dp))
             if (s.isDevUnlocked) Bento(vm, cat("developer"), shared, Modifier.fillMaxWidth().height(108.dp))
         }
     }
