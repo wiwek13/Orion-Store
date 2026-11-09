@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "pinky": {
+      "command": "pinkyctl",
+      "args": [
+        "mcp"
+      ]
+    }
+  }
+}
