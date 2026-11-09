@@ -1,0 +1,90 @@
+package com.orion.store.morphe.model
+
+import kotlinx.serialization.Serializable
+
+/**
+ * Explicit 8-stage state machine for Morphe Patch jobs.
+ */
+@Serializable
+enum class JobStage {
+    QUEUED,
+    DOWNLOADING,
+    VERIFYING,
+    PATCHING,
+    ALIGNING,
+    SIGNING,
+    INSTALLING,
+    SUCCEEDED,
+    FAILED,
+    CANCELLED;
+
+    val isTerminal: Boolean
+        get() = this == SUCCEEDED || this == FAILED || this == CANCELLED
+
+    val isActive: Boolean
+        get() = !isTerminal && this != QUEUED
+}
+
+/**
+ * Patch job parameters.
+ */
+@Serializable
+data class PatchJobParams(
+    val id: String,
+    val packageName: String,
+    val appName: String,
+    val sourceApkUrl: String? = null,
+    val sourceApkPath: String? = null,
+    val targetVersion: String = "",
+    val patchBundleId: String = "",
+    val selectedPatchIds: List<String> = emptyList(),
+    val patchOptions: Map<String, String> = emptyMap(),
+    val signingKeyAlias: String = "morphe-default",
+    val autoInstall: Boolean = true
+)
+
+/**
+ * Persistent Job Entity representing a single build/patch task.
+ */
+@Serializable
+data class PatchJob(
+    val id: String,
+    val params: PatchJobParams,
+    val stage: JobStage = JobStage.QUEUED,
+    val progress: Int = 0, // 0..100
+    val stageMessage: String = "Waiting in queue...",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val failureReason: String? = null,
+    val outputApkPath: String? = null,
+    val logs: List<String> = emptyList()
+) {
+    fun withStage(nextStage: JobStage, message: String = "", progress: Int = this.progress): PatchJob {
+        JobStateMachine.assertLegalTransition(this.stage, nextStage)
+        return copy(
+            stage = nextStage,
+            stageMessage = message.ifEmpty { nextStage.name.lowercase().replaceFirstChar { it.uppercase() } },
+            progress = progress,
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    fun failed(reason: String): PatchJob {
+        JobStateMachine.assertLegalTransition(this.stage, JobStage.FAILED)
+        return copy(
+            stage = JobStage.FAILED,
+            failureReason = reason,
+            stageMessage = "Failed: $reason",
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    fun cancelled(): PatchJob {
+        JobStateMachine.assertLegalTransition(this.stage, JobStage.CANCELLED)
+        return copy(
+            stage = JobStage.CANCELLED,
+            stageMessage = "Job cancelled by user",
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+}

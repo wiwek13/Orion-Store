@@ -1152,6 +1152,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (t != was && t.platform != null) followTab()
     }
 
+    /** Reselecting the active tab pops to its root browse state or dismisses expanded sheets. */
+    fun popOrScrollToTop() {
+        haptic(H.SELECTION)
+        if (canResetBrowse() && tab.platform != null) restoreBrowse()
+        if (expandedView != null) { expandedView = null; expandedApps = emptyList() }
+        if (showAllSorted) { showAllSorted = false; viewAllApps = null }
+    }
+
     /** New & Updated and the show-all lists are shared by the store tabs, so switching platforms refills them for the new one
      *  (New & Updated stays open, now with PC or TV apps). A collection's own list has no twin on another platform: back to its home. */
     private fun followTab() {

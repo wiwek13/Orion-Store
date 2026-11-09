@@ -82,6 +82,7 @@ import com.orion.store.platform.Installer
 import com.orion.store.platform.OrionAi
 import com.orion.store.platform.WirelessAdb
 import com.orion.store.platform.ResultHost
+import com.orion.store.morphe.ui.settings.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -221,6 +222,7 @@ private val CATS = listOf(
     Cat("network", Sym.Wifi, SkyC, "Network", "Wi-Fi rules and auto-update", MaterialShapes.Clover4Leaf),
     Cat("storage", Sym.CleaningServices, Orange, "Storage", "Janitor and saved APKs", MaterialShapes.Sunny),
     Cat("installer", Sym.Shield, Green, "Orion Xtra", "Guardian, Sentinel and installer", MaterialShapes.Gem),
+    Cat("morphe", Sym.Extension, Color(0xFF8B5CF6), "Morphe", "Patch engine, repositories & studio", MaterialShapes.Clover4Leaf),
     Cat("identity", Sym.Backup, Pink, "Backup", "Save or restore your identity", MaterialShapes.Cookie6Sided),
     Cat("interface", Sym.ViewQuilt, Teal, "Interface", "Store layout and visible tabs", MaterialShapes.Pentagon),
     Cat("developer", Sym.Terminal, Yellow, "Developer", "Debug switches and tools", MaterialShapes.SoftBurst),
@@ -344,7 +346,9 @@ fun SettingsScreen(vm: MainViewModel) {
             saved.SaveableStateProvider(m) {
             val avs = this@AnimatedContent
             val cat = CATS.firstOrNull { it.id == m }
-            if (cat == null) Hub(vm, s, d, active, ready, pending) { c ->
+            if (m == "nav_customize") {
+                NavCustomizeScreen(vm, s, onBack = ::back)
+            } else if (cat == null) Hub(vm, s, d, active, ready, pending) { c ->
                 Modifier.sharedBounds(rememberSharedContentState("cat-${c.id}"), avs, resizeMode = PAGE_RESIZE)
             } else Page(cat, Modifier.sharedBounds(rememberSharedContentState("cat-${cat.id}"), avs, resizeMode = PAGE_RESIZE),
                 onBack = ::back) {
@@ -545,8 +549,16 @@ fun SettingsScreen(vm: MainViewModel) {
                         DockSize(vm, s)
                         DockPosition(vm, s)
                     }
+                    "morphe" -> {
+                        MorpheSettingsPage(vm, s, onNavigateToNavCustomize = { vm.settingsMenu = "nav_customize" })
+                    }
                     "interface" -> {
                         LayoutPicker(vm, s)
+                        Section("Navigation customization") {
+                            SRow(Sym.Tune, "Customize navigation bar", "Reorder, show, or hide bottom tabs", onClick = {
+                                vm.settingsMenu = "nav_customize"
+                            }) { Chevron() }
+                        }
                         Section("Navigation tabs") {
                             listOf(Triple("android", "Apps", "Android apps"), Triple("pc", "PC", "PC and desktop software"),
                                 Triple("tv", "TV", "TV and big-screen apps"), Triple("orbit", "Orbit", "Apps you track from their own source"), Triple("myapps", "My Apps", "Library and download history")).forEach { (t, title, desc) ->

@@ -19,7 +19,10 @@ enum class SortOption(val label: String) {
     NAME_DESC("Name (Z-A)"), SIZE_ASC("Size (Smallest)"), SIZE_DESC("Size (Largest)")
 }
 
-enum class Tab(val platform: String?) { ANDROID(Platform.ANDROID), PC(Platform.PC), TV(Platform.TV), ORBIT(null), MYAPPS(null), ABOUT(null), UPDATES(null) }
+enum class Tab(val platform: String?) {
+    ANDROID(Platform.ANDROID), PC(Platform.PC), TV(Platform.TV), ORBIT(null), MYAPPS(null), ABOUT(null), UPDATES(null),
+    MORPHE_STORE(null), PATCH_STUDIO(null), MY_PATCHED_APPS(null), PATCH_QUEUE(null), PATCH_UPDATES(null)
+}
 
 val STREAMS = listOf("Stable", "Beta", "Alpha", "Nightly")
 

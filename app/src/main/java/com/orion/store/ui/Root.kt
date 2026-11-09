@@ -51,14 +51,19 @@ import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.orion.store.R
 import com.orion.store.data.*
+import com.orion.store.morphe.nav.*
+import com.orion.store.morphe.ui.*
+import com.orion.store.morphe.store.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.foundation.horizontalScroll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private data class NavItem(val tab: Tab, val icon: ImageVector, val selected: ImageVector, val label: String, val subtitle: String)
+private data class NavItem(val tab: Tab, val icon: ImageVector, val selected: ImageVector, val label: String, val subtitle: String, val id: String = "")
 private val NAV = listOf(
-    NavItem(Tab.ANDROID, Sym.Android, Sym.AndroidFilled, "Apps", "apps"), NavItem(Tab.PC, Sym.DesktopWindows, Sym.DesktopWindowsFilled, "PC", "PC"),
-    NavItem(Tab.TV, Sym.Tv, Sym.TvFilled, "TV", "TV"), NavItem(Tab.ORBIT, Sym.Orbit, Sym.OrbitFilled, "Orbit", "Orbit"), NavItem(Tab.MYAPPS, Sym.GridView, Sym.GridViewFilled, "My Apps", "my"),
-    NavItem(Tab.ABOUT, Sym.Code, Sym.CodeFilled, "Dev", "About Orion"),
+    NavItem(Tab.ANDROID, Sym.Android, Sym.AndroidFilled, "Apps", "apps", "android"), NavItem(Tab.PC, Sym.DesktopWindows, Sym.DesktopWindowsFilled, "PC", "PC", "pc"),
+    NavItem(Tab.TV, Sym.Tv, Sym.TvFilled, "TV", "TV", "tv"), NavItem(Tab.ORBIT, Sym.Orbit, Sym.OrbitFilled, "Orbit", "Orbit", "orbit"), NavItem(Tab.MYAPPS, Sym.GridView, Sym.GridViewFilled, "My Apps", "my", "myapps"),
+    NavItem(Tab.ABOUT, Sym.Code, Sym.CodeFilled, "Dev", "About Orion", "about"),
 )
 
 @Composable
@@ -88,7 +93,10 @@ fun OrionRoot(vm: MainViewModel) {
 @Composable
 private fun Home(vm: MainViewModel) {
     val s = LocalS.current; val d = LocalD.current
-    val items = NAV.filter { it.tab == Tab.ABOUT || it.tab.name.lowercase() !in s.hiddenTabs }
+    val resolved = resolveVisibleDestinations(s.navConfig, NavRegistry.all, s.morpheEnabled)
+    val items = resolved.filter { it.mandatory || (it.id !in s.hiddenTabs) }.map {
+        NavItem(it.tab, it.icon, it.selectedIcon, it.label, it.subtitle, it.id)
+    }
     val nav = navPlacement(); val rail = nav == "rail"; val topDock = nav == "top"; val bottomDock = nav == "bottom"
     val density = LocalDensity.current
     val navDensity = Density(density.density * s.bottomNavScale.coerceIn(.8f, 1.2f), density.fontScale)
@@ -109,7 +117,7 @@ private fun Home(vm: MainViewModel) {
                 if (s.aiButton) AiStarFace(vm, Modifier.padding(vertical = 8.dp))
             }) {
                 Spacer(Modifier.weight(1f))
-                items.forEach { n -> NavigationRailItem(vm.tab == n.tab, { vm.navTo(n.tab) }, { NavIcon(n, vm.tab == n.tab, updateCount) }, label = { Text(n.label) }) }
+                items.forEach { n -> NavigationRailItem(vm.tab == n.tab, { if (vm.tab == n.tab) vm.popOrScrollToTop() else vm.navTo(n.tab) }, { NavIcon(n, vm.tab == n.tab, updateCount) }, label = { Text(n.label) }) }
                 Spacer(Modifier.weight(1f))
             }
         }
@@ -145,6 +153,11 @@ private fun Home(vm: MainViewModel) {
                             Tab.MYAPPS -> MyAppsTab(vm, inner)
                             Tab.ORBIT -> OrbitTab(vm, inner)
                             Tab.ABOUT -> AboutTab(vm, inner)
+                            Tab.MORPHE_STORE -> MorpheStoreTab(vm, inner)
+                            Tab.PATCH_STUDIO -> PatchStudioTab(vm, inner)
+                            Tab.MY_PATCHED_APPS -> MyPatchedAppsTab(vm, inner)
+                            Tab.PATCH_QUEUE -> PatchQueueTab(vm, inner)
+                            Tab.PATCH_UPDATES -> PatchUpdatesTab(vm, inner)
                             else -> StoreTab(vm, t.platform ?: Platform.ANDROID, inner)
                         }
                     }
@@ -216,8 +229,17 @@ private fun FloatingNav(vm: MainViewModel, items: List<NavItem>, updates: Int, s
         // The classic bar spans the screen on phones; wide screens get it as a floating card, so it never stretches edge to edge
         val wide = LocalWidthClass.current.wide
         val m = if (wide) modifier.then(edge).then(slide).widthIn(max = 560.dp).shadow(8.dp, RoundedCornerShape(28.dp)).clip(RoundedCornerShape(28.dp)) else modifier.then(slide)
+        val barScroll = rememberScrollState()
         NavigationBar(m, containerColor = if (s.isOled) Color.Black else cs.surfaceContainer, windowInsets = if (wide) WindowInsets(0) else NavigationBarDefaults.windowInsets) {
-            items.forEach { n -> NavigationBarItem(vm.tab == n.tab, { vm.navTo(n.tab) }, { NavIcon(n, vm.tab == n.tab, updates) }, label = { Text(n.label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = if (tight) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium) }) }
+            Row(
+                Modifier.then(if (items.size > 5) Modifier.horizontalScroll(barScroll) else Modifier.fillMaxWidth()),
+                horizontalArrangement = Arrangement.SpaceAround,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                items.forEach { n ->
+                    NavigationBarItem(vm.tab == n.tab, { if (vm.tab == n.tab) vm.popOrScrollToTop() else vm.navTo(n.tab) }, { NavIcon(n, vm.tab == n.tab, updates) }, label = { Text(n.label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = if (tight) MaterialTheme.typography.labelSmall else MaterialTheme.typography.labelMedium) })
+                }
+            }
         }
         return
     }
@@ -225,39 +247,74 @@ private fun FloatingNav(vm: MainViewModel, items: List<NavItem>, updates: Int, s
     val oled = s.isOled
     val color = if (oled) Color.Black else cs.surfaceContainerHigh.copy(alpha = if (s.glassEffect) .95f else 1f)
     // OLED: a pitch-black dock, set apart from the black page by a hairline outline instead of a lighter fill
-    Surface(modifier.then(edge).then(slide), shape = if (dock == "labels") RoundedCornerShape(28.dp) else Pill, color = color, shadowElevation = 8.dp,
+    val scrollState = rememberScrollState()
+    LaunchedEffect(vm.tab, items) {
+        val idx = items.indexOfFirst { it.tab == vm.tab }
+        if (idx != -1 && scrollState.maxValue > 0) {
+            val ratio = idx.toFloat() / items.size.coerceAtLeast(1)
+            scrollState.animateScrollTo((ratio * scrollState.maxValue).toInt())
+        }
+    }
+    val needsScroll = items.size >= 6
+    Surface(modifier.then(edge).then(slide).widthIn(max = 680.dp), shape = if (dock == "labels") RoundedCornerShape(28.dp) else Pill, color = color, shadowElevation = 8.dp,
         border = if (oled) androidx.compose.foundation.BorderStroke(1.dp, cs.outline.copy(alpha = .5f)) else null) {
-        Row(Modifier.padding(if (tight) 4.dp else 6.dp), horizontalArrangement = Arrangement.spacedBy(if (dock == "pill") 2.dp else 4.dp), verticalAlignment = Alignment.CenterVertically) {
-            items.forEach { n ->
-                val on = vm.tab == n.tab
-                val fx = MaterialTheme.motionScheme.defaultEffectsSpec<Color>(); val sp = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntSize>()
-                val (onBg, onFg, offFg) = Triple(cs.secondaryContainer, cs.onSecondaryContainer, cs.onSurfaceVariant)
-                val bg by animateColorAsState(if (on) onBg else Color.Transparent, fx, label = "bg")
-                val fg by animateColorAsState(if (on) onFg else offFg, fx, label = "fg")
-                val tap = Modifier.selectable(on, role = Role.Tab) { vm.navTo(n.tab) }
-                when (dock) {
-                    "pill" -> Row(Modifier.height(if (tight) 46.dp else 52.dp).clip(Pill).background(bg).then(tap).padding(horizontal = if (tight) 8.dp else 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
-                        AnimatedVisibility(on, enter = expandHorizontally(sp) + fadeIn(), exit = shrinkHorizontally(sp) + fadeOut()) {
-                            Text(n.label, Modifier.padding(start = if (tight) 4.dp else 8.dp), style = if (tight) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge, color = fg, maxLines = 1)
+        Box(contentAlignment = Alignment.Center) {
+            Row(
+                Modifier
+                    .then(if (needsScroll) Modifier.horizontalScroll(scrollState) else Modifier)
+                    .padding(if (tight) 4.dp else 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (dock == "pill") 2.dp else 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                items.forEach { n ->
+                    val on = vm.tab == n.tab
+                    val fx = MaterialTheme.motionScheme.defaultEffectsSpec<Color>(); val sp = MaterialTheme.motionScheme.defaultSpatialSpec<androidx.compose.ui.unit.IntSize>()
+                    val (onBg, onFg, offFg) = Triple(cs.secondaryContainer, cs.onSecondaryContainer, cs.onSurfaceVariant)
+                    val bg by animateColorAsState(if (on) onBg else Color.Transparent, fx, label = "bg")
+                    val fg by animateColorAsState(if (on) onFg else offFg, fx, label = "fg")
+                    val tap = Modifier.selectable(on, role = Role.Tab) { if (on) vm.popOrScrollToTop() else vm.navTo(n.tab) }
+                    when (dock) {
+                        "pill" -> Row(Modifier.height(if (tight) 46.dp else 52.dp).clip(Pill).background(bg).then(tap).padding(horizontal = if (tight) 8.dp else 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                            CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
+                            AnimatedVisibility(on, enter = expandHorizontally(sp) + fadeIn(), exit = shrinkHorizontally(sp) + fadeOut()) {
+                                Text(n.label, Modifier.padding(start = if (tight) 4.dp else 8.dp), style = if (tight) MaterialTheme.typography.labelMedium else MaterialTheme.typography.labelLarge, color = fg, maxLines = 1)
+                            }
+                        }
+                        "labels" -> Column(Modifier.clip(RoundedCornerShape(22.dp)).then(tap).padding(horizontal = if (tight) 2.dp else 8.dp, vertical = if (tight) 4.dp else 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Box(Modifier.size(if (tight) 40.dp else 56.dp, if (tight) 28.dp else 32.dp).clip(Pill).background(bg), contentAlignment = Alignment.Center) { CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) } }
+                            Text(n.label, Modifier.padding(top = if (tight) 2.dp else 4.dp), style = when {
+                                tight -> MaterialTheme.typography.labelSmall
+                                on -> MaterialTheme.typography.labelMediumEmphasized
+                                else -> MaterialTheme.typography.labelMedium
+                            }, color = if (on) cs.onSurface else offFg, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        // Each tab owns an M3 shape: picking it morphs its indicator from a circle into that shape
+                        "shapes" -> MorphBlob(listOf(MaterialShapes.Circle, DOCK_SHAPES[items.indexOf(n) % DOCK_SHAPES.size]), if (on) 1 else 0, if (tight) 44.dp else 52.dp, bg, Modifier.clip(CircleShape).then(tap)) {
+                            CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
+                        }
+                        else -> Box(Modifier.size(if (tight) 44.dp else 52.dp).clip(CircleShape).background(bg).then(tap), contentAlignment = Alignment.Center) {
+                            CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
                         }
                     }
-                    "labels" -> Column(Modifier.clip(RoundedCornerShape(22.dp)).then(tap).padding(horizontal = if (tight) 2.dp else 8.dp, vertical = if (tight) 4.dp else 6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Box(Modifier.size(if (tight) 40.dp else 56.dp, if (tight) 28.dp else 32.dp).clip(Pill).background(bg), contentAlignment = Alignment.Center) { CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) } }
-                        Text(n.label, Modifier.padding(top = if (tight) 2.dp else 4.dp), style = when {
-                            tight -> MaterialTheme.typography.labelSmall
-                            on -> MaterialTheme.typography.labelMediumEmphasized
-                            else -> MaterialTheme.typography.labelMedium
-                        }, color = if (on) cs.onSurface else offFg, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
-                    // Each tab owns an M3 shape: picking it morphs its indicator from a circle into that shape
-                    "shapes" -> MorphBlob(listOf(MaterialShapes.Circle, DOCK_SHAPES[items.indexOf(n) % DOCK_SHAPES.size]), if (on) 1 else 0, if (tight) 44.dp else 52.dp, bg, Modifier.clip(CircleShape).then(tap)) {
-                        CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
-                    }
-                    else -> Box(Modifier.size(if (tight) 44.dp else 52.dp).clip(CircleShape).background(bg).then(tap), contentAlignment = Alignment.Center) {
-                        CompositionLocalProvider(LocalContentColor provides fg) { NavIcon(n, on, updates) }
-                    }
                 }
+            }
+            if (needsScroll && scrollState.canScrollForward) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .align(Alignment.CenterEnd)
+                        .width(20.dp)
+                        .background(Brush.horizontalGradient(listOf(Color.Transparent, color.copy(alpha = 0.85f))))
+                )
+            }
+            if (needsScroll && scrollState.canScrollBackward) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .align(Alignment.CenterStart)
+                        .width(20.dp)
+                        .background(Brush.horizontalGradient(listOf(color.copy(alpha = 0.85f), Color.Transparent)))
+                )
             }
         }
     }
@@ -270,12 +327,19 @@ private val DOCK_SHAPES = listOf(MaterialShapes.Cookie9Sided, MaterialShapes.Clo
 @Composable
 private fun ExpressiveDock(vm: MainViewModel, items: List<NavItem>, updates: Int, modifier: Modifier) {
     val s = LocalS.current
+    val expScroll = rememberScrollState()
     HorizontalFloatingToolbar(true, modifier, colors = if (s.isOled) FloatingToolbarDefaults.standardFloatingToolbarColors(toolbarContainerColor = Color.Black)
         else FloatingToolbarDefaults.standardFloatingToolbarColors()) {
-        items.forEach { n ->
-            val on = vm.tab == n.tab
-            FilledIconToggleButton(on, { vm.navTo(n.tab) }, modifier = Modifier.size(if (items.size >= 6) 44.dp else 52.dp), shapes = IconButtonDefaults.toggleableShapes(),
-                colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Color.Transparent)) { NavIcon(n, on, updates) }
+        Row(
+            Modifier.then(if (items.size >= 6) Modifier.horizontalScroll(expScroll) else Modifier),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            items.forEach { n ->
+                val on = vm.tab == n.tab
+                FilledIconToggleButton(on, { if (on) vm.popOrScrollToTop() else vm.navTo(n.tab) }, modifier = Modifier.size(if (items.size >= 6) 44.dp else 52.dp), shapes = IconButtonDefaults.toggleableShapes(),
+                    colors = IconButtonDefaults.filledIconToggleButtonColors(containerColor = Color.Transparent)) { NavIcon(n, on, updates) }
+            }
         }
     }
 }
@@ -303,14 +367,27 @@ private fun NavIcon(n: NavItem, on: Boolean, updates: Int) {
     val k = remember { Animatable(1f) }; val spec = MaterialTheme.motionScheme.fastSpatialSpec<Float>()
     LaunchedEffect(on) { if (on) { k.snapTo(.7f); k.animateTo(1f, spec) } }
     val icon = @Composable { Icon(if (on) n.selected else n.icon, n.label, Modifier.graphicsLayer { scaleX = k.value; scaleY = k.value }) }
-    if (n.tab == Tab.MYAPPS && updates > 0) BadgedBox({ Badge { Text("$updates") } }) { icon() } else icon()
+
+    val queueCount by JobStore.activeCount.collectAsStateWithLifecycle()
+    val attentionCount by PatchedAppStore.attentionCount.collectAsStateWithLifecycle()
+    val morpheUpdateCount by MorpheRepoStore.updateCount.collectAsStateWithLifecycle()
+
+    val badgeCount = when (n.tab) {
+        Tab.MYAPPS -> updates
+        Tab.PATCH_QUEUE -> queueCount
+        Tab.MY_PATCHED_APPS -> attentionCount
+        Tab.PATCH_UPDATES -> morpheUpdateCount
+        else -> 0
+    }
+
+    if (badgeCount > 0) BadgedBox({ Badge { Text("$badgeCount") } }) { icon() } else icon()
 }
 
 /** Tab header, drawn as the first item of every tab so it scrolls away with the content. */
 @Composable
 fun Header(vm: MainViewModel) {
     val s = LocalS.current; val d = LocalD.current; val cs = MaterialTheme.colorScheme
-    val subtitle = NAV.firstOrNull { it.tab == vm.tab }?.subtitle ?: ""
+    val subtitle = NavRegistry.findByTab(vm.tab)?.subtitle ?: NAV.firstOrNull { it.tab == vm.tab }?.subtitle ?: ""
     Row(Modifier.fillMaxWidth().height(64.dp).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.weight(1f)) {
             if (vm.tab == Tab.ABOUT) Row(verticalAlignment = Alignment.CenterVertically) {

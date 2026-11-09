@@ -1,6 +1,7 @@
 package com.orion.store.data
 
 import androidx.core.util.AtomicFile
+import com.orion.store.morphe.nav.NavConfigState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -39,6 +40,8 @@ import kotlin.math.max
     val storeLayout: String = "modern",
     val isOled: Boolean = false,
     val materialYouEnabled: Boolean = false,
+    val morpheEnabled: Boolean = false,
+    val navConfig: NavConfigState = NavConfigState(),
     val hiddenTabs: List<String> = emptyList(),
     val virusTotalApiKey: String = "",
     val autoUpdateEnabled: Boolean = false,

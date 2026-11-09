@@ -1,0 +1,186 @@
+# AGENTS.md — Orion Store Contributor & Agent Guide
+
+> **Universal operating instructions, architecture reference, and skill catalog for AI agents and human developers collaborating on Orion Store 2.0 (`Orion-RE`).**
+
+---
+
+## 1. Project Mission & Overview
+
+**Orion Store** is a native Android application store built with modern Jetpack Compose. It is a full native rewrite and evolution of the legacy Capacitor/web storefront (`Orion Legacy/`).
+
+### Core Value Pillars
+- **Zero-overhead native performance**: 100% Jetpack Compose with Material 3 Expressive (`MaterialExpressiveTheme`, `MotionScheme.expressive()`).
+- **Privileged, frictionless installation**: Native integration with **Shizuku**, **Dhizuku** (Device Owner), **Root**, and built-in **Wireless ADB** for silent/background package installs, plus fallback to Android Session PackageInstaller.
+- **Security & Integrity**: On-device signature verification, package hash checking, and VirusTotal integration (`platform/VirusTotal.kt`, `platform/Verifier.kt`, `platform/ApkInsights.kt`).
+- **Customizable, accessible design**: Dynamic theming with Material You, custom tonal schemes (Brand Indigo + Acid Lime tertiary), live shape morphing, custom pixel avatars, and rich haptics.
+
+---
+
+## 2. Codebase Architecture & Key Files
+
+The project is structured as a Single-Activity Jetpack Compose application following MVVM principles and unidirectional data flow.
+
+```
+app/src/main/java/com/orion/store/
+├── OrionApp.kt                  # Application class, lifecycle, crash logging, init
+├── OrionActivity.kt             # Main Activity, edge-to-edge, splash screen, deep links
+├── AutoUpdate.kt                # In-app self-update engine
+│
+├── data/                        # Data layer & persistence
+│   ├── Models.kt                # Data classes (AppItem, Release, Catalog, Config)
+│   ├── Stores.kt                # Persisted state (AtomicFile JSON, Zustand equivalents)
+│   ├── Repository.kt            # Catalog repository, mirrors, cached metadata
+│   ├── CatalogProcessor.kt      # Catalog ingestion, filtering, and normalization
+│   ├── Net.kt / Logic.kt        # OkHttp 5 HTTP client & business logic helpers
+│   ├── Orbit.kt                 # Decentralized/Orbit catalog feeds
+│   └── RepoDetect.kt            # Automated repo & update source detector
+│
+├── platform/                    # Platform & hardware integrations
+│   ├── SessionInstall.kt        # Standard Android PackageInstaller session flow
+│   ├── Shizuku / Dhizuku.kt     # Privileged package manager bridges (silent install)
+│   ├── WirelessAdb.kt           # Embedded wireless ADB pairing and installation
+│   ├── DownloadService.kt       # Foreground download engine with progress notifications
+│   ├── ApkInsights.kt           # APK manifest parser, permissions, and metadata inspection
+│   ├── Verifier.kt              # Signature, hash, and tamper verification
+│   ├── VirusTotal.kt            # VirusTotal API integration for threat scans
+│   ├── Bundles.kt               # Split APK (.apks, .xapk) assembly and install
+│   └── OrionAi.kt / LocalLlm.kt # AI-driven app summaries and assistant
+│
+└── ui/                          # Jetpack Compose UI
+    ├── Root.kt                  # App shell, ShortNavigationBar, Tab router, BottomSheet host
+    ├── MainViewModel.kt         # Central orchestrator VM (Zustand -> StateFlow)
+    ├── StoreScreen.kt           # App discovery, hero carousel, swimlanes, app cards
+    ├── Detail.kt                # App detail page, screenshots, versions, permissions
+    ├── MyApps.kt                # Installed apps, update manager, batch actions
+    ├── Inspect.kt               # Deep APK inspector (permissions, activities, signatures)
+    ├── Settings.kt              # App settings, download dirs, installer backend selector
+    ├── Sheets.kt                # ModalBottomSheet overlays (notices, FAQ, reviews)
+    ├── Theme.kt / Palettes.kt   # Material 3 Expressive theme, color schemes, OLED mode
+    ├── Symbols.kt               # Generated Material Symbols Rounded vectors
+    └── Games.kt / Pixel.kt      # Dino mini-game, pixel avatars, Easter eggs
+```
+
+---
+
+## 3. Tooling & Development Workflow
+
+### Commands
+```bash
+# Build & assemble debug APK
+./gradlew assembleDebug
+
+# Run unit tests
+./gradlew test
+./gradlew testDebugUnitTest
+
+# Linting & code checks
+./gradlew lint
+./gradlew check
+
+# Generate UI vectors and color schemes
+node tools/gen-symbols.mjs
+node tools/gen-scheme.mjs
+```
+
+### Build Conventions
+- Target SDK: 35 | Min SDK: 26 | JVM Target: 17/21
+- Compose BOM: `2026.09.00` with Material 3 `1.5.0-beta01`
+- Network: OkHttp 5 + `kotlinx.serialization`
+- Image Loading: Coil 3
+
+---
+
+## 4. Skills Catalog & Workflow Orchestration
+
+This project is pre-configured with **Superpowers** and domain-specific skills located in `.agents/skills/` (mirrored in `.claude/skills/`, `.agent/skills/`, and `skills/`).
+
+### 4.1 Superpowers (Process Discipline)
+
+When executing engineering work on this codebase, invoke these skills before taking arbitrary action:
+
+| Trigger | Skill to Use | Purpose |
+|---|---|---|
+| Starting a new feature or complex refactor | `brainstorming` | Explore alternatives, user experience, and architecture tradeoffs before writing code. |
+| Prior to writing multi-step code changes | `writing-plans` | Create a clear, atomic implementation plan with verification checkpoints. |
+| Executing an approved plan | `executing-plans` | Execute plan tasks iteratively with continuous testing and review gates. |
+| Implementing any feature or bug fix | `test-driven-development` | Write failing tests first (RED), implement minimum code (GREEN), then refactor. |
+| Investigating bugs, crashes, or ANRs | `systematic-debugging` | Root-cause analysis: isolate reproduction, trace state, verify hypotheses. |
+| Reviewing code or preparing commits | `verification-before-completion` | Run test suite, check lint, and ensure no regressions before declaring completion. |
+| Complex multi-agent execution | `subagent-driven-development` | Delegate scoped work units to focused subagents with strict review gates. |
+
+---
+
+### 4.2 Android Reverse Engineering (`android-reverse-engineering`)
+
+**Location**: `.agents/skills/android-reverse-engineering/SKILL.md`  
+**When to Use**:
+- Analyzing external APKs, XAPKs, or split bundles for catalog inclusion.
+- Investigating installer issues, certificate mismatches, or obfuscated classes.
+- Extracting API endpoints, network hostnames, or hidden permission requirements.
+- Auditing third-party apps for tracker SDKs, malware, or policy violations.
+
+**Key Tools & References**:
+- `scripts/check-deps.sh`: Validates `jadx`, `vineflower`, `dex2jar`, `aapt2`.
+- `scripts/decompile.sh`: Decompiles APK/XAPK into Java/Smali with Jadx or Fernflower.
+- `scripts/recover-kotlin-names.sh`: Recovers `@Metadata` Kotlin symbol names.
+- `scripts/find-api-calls.sh`: Extracts HTTP endpoints, headers, and endpoints.
+- Integration point in code: `com.orion.store.platform.ApkInsights` and `com.orion.store.ui.Inspect`.
+
+---
+
+### 4.3 Mobile App UI/UX Design (`mobile-app-ui-design`)
+
+**Location**: `.agents/skills/mobile-app-ui-design/SKILL.md`  
+**When to Use**:
+- Designing new screens, bottom sheets, dialogs, or hero cards.
+- Refining Material 3 Expressive motion curves, micro-interactions, and animations.
+- Ensuring compliance with thumb-zone ergonomics and touch targets (≥ 48dp).
+
+**Core Design Rules**:
+- **60/30/10 Color Rule**: 60% neutral surface (`surfaceContainer`), 30% structural contrast (`surfaceVariant`, card containers), 10% accent (`primary` brand indigo / `tertiary` acid-lime).
+- **8-Point Spacing Grid**: All margins, paddings, and component heights adhere to 4dp/8dp/16dp/24dp/32dp increments.
+- **Expressive Motion**: Utilize `MotionScheme.expressive()` and spring physics for sheet transitions, card press morphing, and expand/collapse states.
+- **Edge-to-Edge**: Always account for system status and navigation bar insets using Compose `WindowInsets`.
+
+---
+
+### 4.4 Android Core Skills (`android-skills`)
+
+A complete suite of deep Android development skills located in `.agents/skills/`:
+
+| Skill | Focus Area |
+|---|---|
+| `compose` | State hoisting, `derivedStateOf`, recomposition avoidance, custom layouts, `CompositionLocal` usage. |
+| `kotlin-coroutines` & `kotlin-flows` | Structured concurrency, `viewModelScope`, `SharingStarted.WhileSubscribed(5_000)`, backpressure handling. |
+| `android-data-layer` | Clean architecture repositories, offline-first caching, remote vs local data synchronization. |
+| `datastore` | Migrating from SharedPreferences to Jetpack Preferences / Proto DataStore. |
+| `paging` | Paging 3 integration for infinite scroll catalog listings and memory-efficient list views. |
+| `android-retrofit` / `kmp-ktor` | Resilient network clients, interceptors, error mapping, and serialization. |
+| `coil-compose` | High-performance image and vector caching, SVG renderers, placeholder transitions. |
+| `android-debugging` | Resolving ANRs, memory leaks (LeakCanary), Logcat filtering, StrictMode violations. |
+| `android-testing` | Unit testing ViewModels (`Turbine`, `kotlinx-coroutines-test`), Compose UI testing with test tags. |
+| `android-ux` | Modern Android 14/15 UX: predictive back gesture, dynamic themed app icons, insets. |
+| `modularization` | Feature-by-module architecture, reducing build times, enforcing clean dependency boundaries. |
+| `gradle-build-performance` & `android-gradle-logic` | Configuration cache, build cache, convention plugins, and Kotlin DSL optimization. |
+
+---
+
+## 5. Engineering Guardrails for AI Agents
+
+1. **Safety with Privileged Installer APIs**:
+   - Never run unverified root commands.
+   - Always validate Shizuku / Dhizuku IPC connection state before invoking binder transactions (`com.orion.store.platform.Dhizuku.isAvailable()`).
+   - All package installs must catch `SecurityException` and fallback gracefully to `SessionInstall.kt`.
+
+2. **Network & Serialization Resilience**:
+   - The app must **never crash** on malformed remote JSON. Always use safe deserialization with default values in `data/Models.kt`.
+   - Implement exponential backoff and timeout handling on all network calls (`data/Net.kt`).
+
+3. **Compose Best Practices**:
+   - Avoid executing non-trivial computations inside composable functions without `remember`.
+   - Never invoke ViewModel methods that mutate state directly inside composition without `LaunchedEffect`.
+   - Always expose immutable UI state (`StateFlow<T>`) from `MainViewModel`.
+
+4. **Preserve Existing Comments & Architecture**:
+   - Do not remove existing comments, docstrings, or license headers.
+   - Ensure backwards compatibility with legacy settings stored in AtomicFile JSON (`data/Stores.kt`).
