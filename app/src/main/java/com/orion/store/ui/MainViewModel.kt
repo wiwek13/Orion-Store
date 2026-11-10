@@ -138,8 +138,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun toggleMorpheStore() {
         isMorpheStoreActive = !isMorpheStoreActive
         haptic(H.SELECTION)
-        if (isMorpheStoreActive && com.orion.store.morphe.store.MorpheCatalogRepository.apps.value.isEmpty()) {
-            viewModelScope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
+        if (isMorpheStoreActive) {
+            tabUpd { it.copy(sort = SortOption.MOST_PATCHES) }
+            viewModelScope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = false) }
+        } else {
+            tabUpd { it.copy(sort = SortOption.HOME) }
         }
     }
 

@@ -102,35 +102,9 @@ fun NavCustomizeScreen(
                 Icon(Sym.Info, null, Modifier.size(18.dp), tint = cs.onSecondaryContainer)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    "Use Move Up/Down to reorder. Core tabs cannot be reduced below 2 tabs. Dev tab is mandatory.",
+                    "Use Move Up/Down to reorder tabs. Dev tab is mandatory.",
                     style = MaterialTheme.typography.bodySmall,
                     color = cs.onSecondaryContainer
-                )
-            }
-        }
-
-        // Morphe Ecosystem Toggle
-        Surface(
-            Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 6.dp),
-            shape = RoundedCornerShape(18.dp),
-            color = if (s.morpheEnabled) cs.primaryContainer else cs.surfaceContainerHigh
-        ) {
-            Row(
-                Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("Enable Morphe Ecosystem", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    Text("Adds Morphe Store, Studio, My Patched Apps, Queue & Updates", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
-                }
-                Switch(
-                    checked = s.morpheEnabled,
-                    onCheckedChange = {
-                        vm.haptic(H.SELECTION)
-                        vm.set { it.copy(morpheEnabled = !it.morpheEnabled) }
-                    }
                 )
             }
         }
@@ -199,9 +173,9 @@ fun NavCustomizeScreen(
                                 }
                             }
                             Text(
-                                if (dest.group == NavGroup.CORE) "Core tab" else "Morphe tab",
+                                dest.subtitle,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = if (dest.group == NavGroup.MORPHE) cs.tertiary else cs.onSurfaceVariant
+                                color = cs.onSurfaceVariant
                             )
                         }
 

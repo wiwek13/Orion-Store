@@ -50,7 +50,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 private val MODERN_SORTS = listOf(SortOption.NEWEST, SortOption.NAME_ASC, SortOption.NAME_DESC, SortOption.SIZE_ASC, SortOption.SIZE_DESC, SortOption.OLDEST)
-private val CLASSIC_SORTS = SortOption.entries - SortOption.HOME
+private val MORPHE_SORTS = listOf(SortOption.MOST_PATCHES, SortOption.MOST_DOWNLOADS, SortOption.NAME_ASC, SortOption.NAME_DESC, SortOption.NEWEST)
+private val CLASSIC_SORTS = SortOption.entries - SortOption.HOME - SortOption.MOST_PATCHES - SortOption.MOST_DOWNLOADS
 private val full: LazyGridItemSpanScope.() -> GridItemSpan = { GridItemSpan(maxLineSpan) }
 private val BLOB_SHAPES = listOf(MaterialShapes.Cookie9Sided, MaterialShapes.Sunny, MaterialShapes.Clover4Leaf, MaterialShapes.Cookie6Sided, MaterialShapes.Pentagon, MaterialShapes.Flower, MaterialShapes.Gem)
 private val FAN = listOf(-6f, 5f, 3f, -4f)
@@ -70,11 +71,21 @@ fun StoreTab(vm: MainViewModel, platform: String, contentPadding: PaddingValues)
     val grid = rememberLazyGridState(); val scope = rememberCoroutineScope()
     val morpheApps by com.orion.store.morphe.store.MorpheCatalogRepository.apps.collectAsState()
     val isMorpheSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
-    val filteredMorpheApps = remember(morpheApps, vm.morpheCategory, ts.query, vm.isMorpheStoreActive) {
+    val filteredMorpheApps = remember(morpheApps, vm.morpheCategory, ts.query, vm.isMorpheStoreActive, vm.sortControl) {
         if (!vm.isMorpheStoreActive) emptyList()
-        else morpheApps.filter { app ->
-            (vm.morpheCategory == "All" || app.category.equals(vm.morpheCategory, ignoreCase = true)) &&
-            (ts.query.isBlank() || app.name.contains(ts.query, ignoreCase = true) || app.packageName.contains(ts.query, ignoreCase = true) || app.category.contains(ts.query, ignoreCase = true))
+        else {
+            val unranked = morpheApps.filter { app ->
+                (vm.morpheCategory == "All" || app.category.equals(vm.morpheCategory, ignoreCase = true)) &&
+                (ts.query.isBlank() || app.name.contains(ts.query, ignoreCase = true) || app.packageName.contains(ts.query, ignoreCase = true) || app.category.contains(ts.query, ignoreCase = true))
+            }
+            when (vm.sortControl) {
+                SortOption.MOST_PATCHES -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.patchCount }.thenByDescending { it.installs })
+                SortOption.MOST_DOWNLOADS -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.installs }.thenByDescending { it.patchCount })
+                SortOption.NAME_ASC -> unranked.sortedBy { it.name.lowercase() }
+                SortOption.NAME_DESC -> unranked.sortedByDescending { it.name.lowercase() }
+                SortOption.NEWEST -> unranked.sortedByDescending { it.bundleCount }
+                else -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.patchCount }.thenByDescending { it.installs })
+            }
         }
     }
     // Jump to top only when the filter actually changes, not when returning to a tab whose scroll was restored.
@@ -176,7 +187,7 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
 
     Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            item("sort") { SortButton(vm, if (modern) MODERN_SORTS else CLASSIC_SORTS) }
+            item("sort") { SortButton(vm, if (vm.isMorpheStoreActive) MORPHE_SORTS else if (modern) MODERN_SORTS else CLASSIC_SORTS) }
             item("fav") {
                 FilledTonalIconToggleButton(ts.filterFavorites, { vm.toggleFavorites() }, shapes = IconButtonDefaults.toggleableShapes()) {
                     Icon(if (ts.filterFavorites) Sym.Favorite else Sym.FavoriteBorder, "Show Favorites")

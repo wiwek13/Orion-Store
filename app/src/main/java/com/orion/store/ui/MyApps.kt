@@ -27,6 +27,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.orion.store.data.*
@@ -211,11 +212,22 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             Spacer(Modifier.width(if (compact) 12.dp else 16.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(r.app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(r.app.name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     if (r.isPatched) {
                         Spacer(Modifier.width(6.dp))
-                        Badge(containerColor = cs.tertiaryContainer, contentColor = cs.onTertiaryContainer) {
-                            Text("Patched")
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = cs.tertiaryContainer,
+                            contentColor = cs.onTertiaryContainer
+                        ) {
+                            Text(
+                                "Patched",
+                                Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
                     }
                 }

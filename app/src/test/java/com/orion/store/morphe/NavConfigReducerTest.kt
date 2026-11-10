@@ -49,22 +49,13 @@ class NavConfigReducerTest {
     }
 
     @Test
-    fun testMorpheDestinationsAppendedInDefaultOrder() {
+    fun testCoreDestinationsPreservedInAll() {
         val all = NavRegistry.all
-        assertEquals(11, all.size)
+        assertEquals(6, all.size)
 
-        // First 6 are core
-        assertEquals(listOf("android", "pc", "tv", "orbit", "myapps", "about"), all.take(6).map { it.id })
-
-        // Remaining 5 are Morphe
-        val morphe = all.drop(6)
-        assertEquals(5, morphe.size)
-        assertEquals(
-            listOf("morphe_store", "patch_studio", "my_patched_apps", "patch_queue", "patch_updates"),
-            morphe.map { it.id }
-        )
-        assertTrue(morphe.all { it.group == NavGroup.MORPHE })
-        assertTrue(morphe.all { it.featureFlag == "morphe_enabled" })
+        // All 6 are core destinations
+        assertEquals(listOf("android", "pc", "tv", "orbit", "myapps", "about"), all.map { it.id })
+        assertTrue(all.all { it.group == NavGroup.CORE })
     }
 
     @Test
@@ -138,7 +129,7 @@ class NavConfigReducerTest {
             )
         )
 
-        // Sync with full registry (which contains 11 destinations)
+        // Sync with full registry (which contains 6 core destinations)
         val synced = reduceNavConfig(customState, NavConfigAction.SyncRegistry())
 
         // Top 3 must remain in custom order
@@ -146,44 +137,41 @@ class NavConfigReducerTest {
         assertEquals("android", synced.items[1].id)
         assertEquals("about", synced.items[2].id)
 
-        // The remaining 8 destinations must be appended after
-        assertEquals(11, synced.items.size)
+        // The remaining 3 core destinations must be appended after
+        assertEquals(6, synced.items.size)
         val remainingIds = synced.items.drop(3).map { it.id }
-        assertTrue(remainingIds.contains("morphe_store"))
-        assertTrue(remainingIds.contains("patch_studio"))
+        assertTrue(remainingIds.contains("pc"))
+        assertTrue(remainingIds.contains("tv"))
+        assertTrue(remainingIds.contains("myapps"))
     }
 
     @Test
-    fun testFeatureFlagGatingInResolveVisibleDestinations() {
+    fun testResolveVisibleDestinationsRetainsCore() {
         val fullConfig = NavConfigState(items = NavRegistry.all.map { NavPillConfig(it.id, visible = true) })
 
-        // When flag is OFF: only core destinations are resolved
         val coreOnly = resolveVisibleDestinations(fullConfig, morpheEnabled = false)
         assertEquals(6, coreOnly.size)
         assertTrue(coreOnly.none { it.group == NavGroup.MORPHE })
 
-        // When flag is ON: all 11 destinations are resolved
         val allVisible = resolveVisibleDestinations(fullConfig, morpheEnabled = true)
-        assertEquals(11, allVisible.size)
-        assertEquals(5, allVisible.count { it.group == NavGroup.MORPHE })
+        assertEquals(6, allVisible.size)
     }
 
     @Test
-    fun testUserCanIndividuallyEnableAndDisableMorpheTabs() {
+    fun testUserCanIndividuallyEnableAndDisableTabs() {
         val fullConfig = NavConfigState(items = NavRegistry.all.map { NavPillConfig(it.id, visible = true) })
 
-        // User disables patch_queue and patch_updates
-        var state = reduceNavConfig(fullConfig, NavConfigAction.SetVisibility("patch_queue", false))
-        state = reduceNavConfig(state, NavConfigAction.SetVisibility("patch_updates", false))
+        // User hides pc and tv
+        var state = reduceNavConfig(fullConfig, NavConfigAction.SetVisibility("pc", false))
+        state = reduceNavConfig(state, NavConfigAction.SetVisibility("tv", false))
 
         val resolved = resolveVisibleDestinations(state, morpheEnabled = true)
-        assertEquals(9, resolved.size)
-        assertFalse(resolved.any { it.id == "patch_queue" })
-        assertFalse(resolved.any { it.id == "patch_updates" })
+        assertEquals(4, resolved.size)
+        assertFalse(resolved.any { it.id == "pc" })
+        assertFalse(resolved.any { it.id == "tv" })
 
-        // Morphe store and studio remain visible
-        assertTrue(resolved.any { it.id == "morphe_store" })
-        assertTrue(resolved.any { it.id == "patch_studio" })
-        assertTrue(resolved.any { it.id == "my_patched_apps" })
+        // Android and My Apps remain visible
+        assertTrue(resolved.any { it.id == "android" })
+        assertTrue(resolved.any { it.id == "myapps" })
     }
 }

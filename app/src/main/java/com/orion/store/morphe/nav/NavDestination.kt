@@ -171,8 +171,8 @@ object NavRegistry {
     )
 
     val coreDestinations: List<NavDestination> = listOf(ANDROID, PC, TV, ORBIT, MYAPPS, ABOUT)
-    val morpheDestinations: List<NavDestination> = listOf(MORPHE_STORE, PATCH_STUDIO, MY_PATCHED_APPS, PATCH_QUEUE, PATCH_UPDATES)
-    val all: List<NavDestination> = coreDestinations + morpheDestinations
+    val morpheDestinations: List<NavDestination> = emptyList()
+    val all: List<NavDestination> = coreDestinations
 
     fun findById(id: String): NavDestination? = all.firstOrNull { it.id == id }
     fun findByTab(tab: Tab): NavDestination? = all.firstOrNull { it.tab == tab }

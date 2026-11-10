@@ -70,6 +70,11 @@ object JobStore {
         )
         _jobs.update { listOf(job) + it }
         recalculateActive()
+        try {
+            com.orion.store.morphe.worker.PatchJobRunner.runJob(job, com.orion.store.OrionApp.instance)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         return job
     }
 

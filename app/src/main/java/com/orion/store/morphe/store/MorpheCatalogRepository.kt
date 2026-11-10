@@ -75,10 +75,14 @@ object MorpheCatalogRepository {
         get() = File(OrionApp.instance.filesDir, CACHE_FILE)
 
     init {
-        // Load cached file on startup, then trigger background sync
+        // Load cached file on startup, then trigger background sync and periodic sync loop
         scope.launch {
             loadFromCache()
             sync(force = false)
+            while (true) {
+                kotlinx.coroutines.delay(4 * 3600 * 1000L)
+                sync(force = true)
+            }
         }
     }
 

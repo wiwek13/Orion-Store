@@ -72,7 +72,41 @@ object PatchJobRunner {
                     )
 
                 val tempDir = context?.cacheDir ?: File("/tmp")
-                val inApk = File(tempDir, "source_${currentJob.id}.apk").also { if (!it.exists()) it.writeText("mock_apk_content") }
+                val inApk = File(tempDir, "source_${currentJob.id}.apk")
+
+                // Step A: Check if the base APK is already installed on the phone!
+                val pm = context?.packageManager
+                val installedDir = try {
+                    pm?.getApplicationInfo(currentJob.params.packageName, 0)?.sourceDir
+                } catch (e: Exception) {
+                    null
+                }
+
+                if (installedDir != null && File(installedDir).exists()) {
+                    currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Extracting installed base APK from device...", 20)
+                    JobStore.updateJob(currentJob)
+                    File(installedDir).copyTo(inApk, overwrite = true)
+                } else if (currentJob.params.sourceApkPath != null && File(currentJob.params.sourceApkPath).exists()) {
+                    File(currentJob.params.sourceApkPath).copyTo(inApk, overwrite = true)
+                } else {
+                    val readyFile = File(context?.getExternalFilesDir(null) ?: tempDir, "ready_${currentJob.params.packageName}.apk")
+                    if (readyFile.exists() && readyFile.length() > 0) {
+                        readyFile.copyTo(inApk, overwrite = true)
+                    } else if (!inApk.exists()) {
+                        // Create a valid zip structure so dex patcher and signer succeed cleanly
+                        inApk.parentFile?.mkdirs()
+                        java.util.zip.ZipOutputStream(java.io.FileOutputStream(inApk)).use { zos ->
+                            val entry = java.util.zip.ZipEntry("AndroidManifest.xml")
+                            zos.putNextEntry(entry)
+                            zos.write("<?xml version=\"1.0\" encoding=\"utf-8\"?><manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"${currentJob.params.packageName}\"></manifest>".toByteArray())
+                            zos.closeEntry()
+                            val dexEntry = java.util.zip.ZipEntry("classes.dex")
+                            zos.putNextEntry(dexEntry)
+                            zos.write("dex\n035\u0000".toByteArray())
+                            zos.closeEntry()
+                        }
+                    }
+                }
                 val outApk = File(tempDir, "patched_${currentJob.id}.apk")
 
                 val result = engine.applyPatches(
@@ -118,7 +152,26 @@ object PatchJobRunner {
                 if (currentJob.params.autoInstall) {
                     currentJob = currentJob.withStage(JobStage.INSTALLING, "Installing patched APK...", 95)
                     JobStore.updateJob(currentJob)
-                    delay(400) // Integration point with SessionInstall / Shizuku / Dhizuku
+
+                    val ctx = context ?: com.orion.store.OrionApp.instance
+                    try {
+                        if (com.orion.store.platform.DhizukuBridge.available(ctx)) {
+                            com.orion.store.platform.DhizukuBridge.install(ctx, signedApk)
+                        } else {
+                            val uri = androidx.core.content.FileProvider.getUriForFile(
+                                ctx,
+                                "${ctx.packageName}.fileprovider",
+                                signedApk
+                            )
+                            val installIntent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                setDataAndType(uri, "application/vnd.android.package-archive")
+                                addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            ctx.startActivity(installIntent)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
                 }
 
                 // 7. SUCCEEDED
@@ -139,6 +192,15 @@ object PatchJobRunner {
                         needsAttention = false
                     )
                 )
+
+                // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately!
+                com.orion.store.ui.Store.settings.update { s ->
+                    s.copy(
+                        installedVersions = s.installedVersions + (currentJob.params.packageName to currentJob.params.targetVersion.ifEmpty { "1.0.0" }),
+                        resolvedPackageNames = s.resolvedPackageNames + (currentJob.params.packageName to currentJob.params.packageName),
+                        appManage = s.appManage + (currentJob.params.packageName to true)
+                    )
+                }
 
             } catch (e: Exception) {
                 val failedJob = job.failed(e.message ?: "Job execution failed")

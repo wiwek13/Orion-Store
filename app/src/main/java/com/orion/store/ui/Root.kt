@@ -150,14 +150,10 @@ private fun Home(vm: MainViewModel) {
                 AnimatedContent(vm.tab, Modifier.fillMaxSize(), transitionSpec = { (fadeIn(fx) + scaleIn(fx, .98f)) togetherWith fadeOut(fast) }, label = "tab") { t ->
                     saved.SaveableStateProvider(t.name) {
                         when (t) {
-                            Tab.MYAPPS -> MyAppsTab(vm, inner)
+                            Tab.MYAPPS, Tab.MY_PATCHED_APPS -> MyAppsTab(vm, inner)
                             Tab.ORBIT -> OrbitTab(vm, inner)
                             Tab.ABOUT -> AboutTab(vm, inner)
-                            Tab.MORPHE_STORE -> MorpheStoreTab(vm, inner)
-                            Tab.PATCH_STUDIO -> PatchStudioTab(vm, inner)
-                            Tab.MY_PATCHED_APPS -> MyPatchedAppsTab(vm, inner)
-                            Tab.PATCH_QUEUE -> PatchQueueTab(vm, inner)
-                            Tab.PATCH_UPDATES -> PatchUpdatesTab(vm, inner)
+                            Tab.MORPHE_STORE, Tab.PATCH_STUDIO, Tab.PATCH_QUEUE, Tab.PATCH_UPDATES -> StoreTab(vm, Platform.ANDROID, inner)
                             else -> StoreTab(vm, t.platform ?: Platform.ANDROID, inner)
                         }
                     }
