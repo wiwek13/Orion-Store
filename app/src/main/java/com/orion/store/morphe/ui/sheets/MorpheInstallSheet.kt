@@ -61,7 +61,15 @@ fun MorpheInstallSheet(
     }
 
     val specificBundles = remember(specificPatches) {
-        specificPatches.groupBy { it.bundleName.ifEmpty { "App Patches" } }
+        val grouped = specificPatches.groupBy { it.bundleName.ifEmpty { "App Patches" } }
+        grouped.entries.sortedByDescending { (name, _) ->
+            when {
+                name.contains("Hush", ignoreCase = true) -> 100
+                name.contains("Morphe", ignoreCase = true) -> 50
+                name.contains("Piko", ignoreCase = true) -> 40
+                else -> 0
+            }
+        }.associate { it.key to it.value }
     }
     val universalBundles = remember(universalPatches) {
         universalPatches.groupBy { it.bundleName.ifEmpty { "Universal Patches" } }

@@ -131,13 +131,7 @@ object PatchJobRunner {
                 val matchedPatches = if (selectedIds.isNotEmpty()) {
                     allPatches.filter { patch ->
                         val compositeKey = "${patch.bundleName}::${patch.name}"
-                        if (selectedIds.contains(compositeKey)) {
-                            true
-                        } else if (selectedIds.contains(patch.name)) {
-                            if (primaryBundle.isNotEmpty()) {
-                                patch.bundleName.equals(primaryBundle, ignoreCase = true)
-                            } else true
-                        } else false
+                        selectedIds.contains(compositeKey) || selectedIds.contains(patch.name)
                     }
                 } else {
                     emptyList()
@@ -185,7 +179,12 @@ object PatchJobRunner {
                     JobStore.updateJob(currentJob)
                 }
 
-                currentJob = currentJob.withLog("[PATCH] Applying ${patchesToApply.size} selected patches...")
+                val bundleDisplay = primaryBundle.ifEmpty { patchesToApply.firstOrNull()?.id?.substringBefore("-") ?: "Community" }
+                currentJob = currentJob.withLog("[PATCH] Applying ${patchesToApply.size} patches from bundle '$bundleDisplay'...")
+                if (patchesToApply.isNotEmpty()) {
+                    val preview = patchesToApply.take(6).joinToString(", ") { it.name } + if (patchesToApply.size > 6) " (+${patchesToApply.size - 6} more)" else ""
+                    currentJob = currentJob.withLog("[PATCH] Active patches: $preview")
+                }
                 JobStore.updateJob(currentJob)
 
                 val outApk = File(sessionDir, "patched_output.apk")
@@ -193,7 +192,10 @@ object PatchJobRunner {
                 val result = engine.applyPatches(
                     inputApk = inApk,
                     selectedPatches = patchesToApply,
-                    options = currentJob.params.patchOptions,
+                    options = currentJob.params.patchOptions + mapOf(
+                        "packageName" to currentJob.params.packageName,
+                        "bundleName" to primaryBundle
+                    ),
                     outputApk = outApk
                 ) { stageMsg, pct ->
                     currentJob = currentJob.copy(

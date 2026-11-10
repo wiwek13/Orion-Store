@@ -268,7 +268,9 @@ object MorpheCatalogRepository {
                                 targetVersions = assignedVers.toList()
                             )
                             val patchList = appPatchesMap.getOrPut(pkg) { mutableListOf() }
-                            val existingIdx = patchList.indexOfFirst { it.name.equals(patchName, ignoreCase = true) }
+                            val existingIdx = patchList.indexOfFirst {
+                                it.bundleName.equals(bundleName, ignoreCase = true) && it.name.equals(patchName, ignoreCase = true)
+                            }
                             if (existingIdx >= 0) {
                                 val existing = patchList[existingIdx]
                                 val mergedVers = (existing.targetVersions + assignedVers).distinct()
@@ -435,11 +437,12 @@ object MorpheCatalogRepository {
             for ((pkg, patches) in newAppPatches) {
                 val existing = appPatchesCache[pkg]
                 val existingPatches = existing?.first ?: emptyList()
-                val seenNames = existingPatches.map { it.name.lowercase() }.toMutableSet()
+                val seenKeys = existingPatches.map { "${it.bundleName}::${it.name.trim().lowercase()}" }.toMutableSet()
                 val mergedList = existingPatches.toMutableList()
 
                 for (p in patches) {
-                    if (seenNames.add(p.name.lowercase())) {
+                    val key = "${p.bundleName}::${p.name.trim().lowercase()}"
+                    if (seenKeys.add(key)) {
                         mergedList.add(p)
                     }
                 }
