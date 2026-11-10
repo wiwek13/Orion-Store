@@ -6,6 +6,9 @@ import com.orion.store.data.Net
 import com.orion.store.ui.Store
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
@@ -16,6 +19,8 @@ import java.net.URLEncoder
  * Implements Section 4 of Orion Store Fork Specification.
  */
 object DownloadOrchestrator {
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     data class ResolvedApk(
         val baseApk: File,
@@ -76,7 +81,13 @@ object DownloadOrchestrator {
         }
 
         // Tier 2: MorpheFlow Base APK Cascade
-        // Fallback 1: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
+        // Fallback 1: GitHub Official Releases (for open-source apps like Brave Browser)
+        val githubResult = resolveFromGitHubReleases(packageName, requestedVersion, targetDir, onProgress)
+        if (githubResult != null && isApkValid(githubResult.baseApk)) {
+            return@withContext githubResult
+        }
+
+        // Fallback 2: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
         onProgress("Resolving from APKPure repository...", 20)
         val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
         if (apkPureResult != null && isApkValid(apkPureResult.baseApk)) {
@@ -152,6 +163,42 @@ object DownloadOrchestrator {
             }
         }
         return null
+    }
+
+    private suspend fun resolveFromGitHubReleases(
+        packageName: String,
+        versionName: String,
+        targetDir: File,
+        onProgress: (String, Int) -> Unit
+    ): ResolvedApk? {
+        return try {
+            val repoSlug = when (packageName) {
+                "com.brave.browser" -> "brave/brave-browser"
+                else -> null
+            } ?: return null
+
+            onProgress("Checking GitHub releases for $repoSlug...", 22)
+            val apiUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
+            val req = Request.Builder().url(apiUrl).header("User-Agent", "OrionStore").build()
+            val resp = Net.client.newCall(req).execute()
+            val body = resp.body?.string() ?: return null
+
+            val jsonElement = json.parseToJsonElement(body)
+            val assets = (jsonElement as? JsonObject)?.get("assets") as? JsonArray ?: return null
+            val apkAsset = assets.firstOrNull { elem ->
+                val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
+                name.endsWith(".apk") && (name.contains("arm64") || name.contains("monoarm64"))
+            } as? JsonObject ?: return null
+
+            val dlUrl = apkAsset["browser_download_url"]?.toString()?.trim('"') ?: return null
+            val targetFile = File(targetDir, "github_${packageName}.apk")
+            if (downloadFile(dlUrl, targetFile, onProgress, 25, 45) && isApkValid(targetFile)) {
+                return normalizeApkBundle(targetFile, targetDir, "GitHub Releases ($repoSlug)", versionName)
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private suspend fun resolveFromGooglePlay(

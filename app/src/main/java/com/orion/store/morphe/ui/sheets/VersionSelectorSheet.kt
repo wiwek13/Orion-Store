@@ -188,6 +188,26 @@ fun VersionSelectorSheet(
                     )
                 }
 
+                // Choice 1.5: Installed on Device (if available on this device)
+                val installedVer = vm.s.installedVersions[app.packageName]
+                if (!installedVer.isNullOrBlank()) {
+                    item {
+                        VersionChoiceRow(
+                            title = "Installed on Device (v$installedVer)",
+                            subtitle = "Extracted directly from this phone — zero download needed",
+                            badge = "Installed",
+                            badgeColor = cs.tertiaryContainer,
+                            badgeTextColor = cs.onTertiaryContainer,
+                            isSelected = selectedVersion == installedVer,
+                            onClick = {
+                                selectedType = VersionSelectionType.SPECIFIC
+                                selectedVersion = installedVer
+                                vm.haptic(H.SELECTION)
+                            }
+                        )
+                    }
+                }
+
                 // Choice 2: Latest Upstream Version
                 item {
                     VersionChoiceRow(
