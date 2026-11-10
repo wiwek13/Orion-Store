@@ -33,6 +33,8 @@ import com.orion.store.AutoUpdate
 import com.orion.store.data.*
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
+import com.orion.store.morphe.model.PatchJob
+import com.orion.store.morphe.store.JobStore
 import com.orion.store.platform.*
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -862,6 +864,93 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val (t, x) = installFailureText(msg, app.name); haptic(H.ERROR)
             val signer = listOf("UPDATE_INCOMPATIBLE", "signatures do not match").any { it in msg }
             installIssue = InstallIssue(app, t, x, (s.resolvedPackageNames[app.id] ?: app.packageName)?.takeIf { signer && it.isNotBlank() })
+        }
+    }
+
+    fun installPatchedApk(job: PatchJob) = viewModelScope.launch(Dispatchers.IO) {
+        val path = job.outputApkPath ?: return@launch
+        val file = java.io.File(path)
+        if (!file.exists() || !DownloadOrchestrator.isApkValid(file)) {
+            withContext(Dispatchers.Main) {
+                haptic(H.ERROR)
+                error("Patched APK file not found or corrupted.")
+            }
+            return@launch
+        }
+
+        withContext(Dispatchers.Main) {
+            haptic(H.LIGHT)
+            toast("Starting installation for ${job.params.appName}...")
+        }
+
+        val realPkg = try {
+            ctx.packageManager.getPackageArchiveInfo(file.absolutePath, 0)?.packageName
+        } catch (e: Exception) {
+            job.params.packageName
+        } ?: job.params.packageName
+
+        if (DhizukuBridge.available(ctx) && DhizukuBridge.granted(ctx)) {
+            val ok = runCatching { DhizukuBridge.install(ctx, file) }.isSuccess
+            withContext(Dispatchers.Main) {
+                if (ok) {
+                    haptic(H.SUCCESS)
+                    toast("Installed ${job.params.appName} via Dhizuku!")
+                    JobStore.removeJob(job.id)
+                } else {
+                    toast("Dhizuku install did not complete; opening system installer...")
+                    installPatchedViaSession(job, file, realPkg)
+                }
+            }
+        } else {
+            installPatchedViaSession(job, file, realPkg)
+        }
+    }
+
+    private suspend fun installPatchedViaSession(job: PatchJob, file: java.io.File, realPkg: String) {
+        val (status, msg) = SessionInstall.commit(ctx, listOf(file), realPkg, ask = true)
+        withContext(Dispatchers.Main) {
+            if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS) {
+                haptic(H.SUCCESS)
+                toast("Installed ${job.params.appName} successfully!")
+                JobStore.removeJob(job.id)
+            } else {
+                val isConflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
+                    msg?.contains("signatures do not match", ignoreCase = true) == true ||
+                    msg?.contains("INCOMPATIBLE", ignoreCase = true) == true ||
+                    msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                val isAborted = status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED ||
+                    status == -1 ||
+                    msg?.contains("cancelled", ignoreCase = true) == true ||
+                    msg?.contains("aborted", ignoreCase = true) == true
+                val reason = when {
+                    isConflict -> "Signature or package conflict: An incompatible version of ${job.params.appName} is installed. Please uninstall the original app, then tap 'Install Built APK'."
+                    isAborted -> "Installation cancelled. Tap 'Install Built APK' to try again."
+                    else -> "Installation failed (status $status): ${msg ?: "Installer error"}. Tap 'Install Built APK' to try again."
+                }
+                haptic(H.ERROR)
+                JobStore.updateJob(job.copy(failureReason = reason, stageMessage = reason, outputApkPath = file.absolutePath))
+            }
+        }
+    }
+
+    fun requestUninstall(packageName: String) {
+        try {
+            val intent = Intent(Intent.ACTION_DELETE).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            ctx.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                @Suppress("DEPRECATION")
+                val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
+                    data = Uri.parse("package:$packageName")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(intent)
+            } catch (e2: Exception) {
+                error("Could not trigger uninstall: ${e2.message}")
+            }
         }
     }
 

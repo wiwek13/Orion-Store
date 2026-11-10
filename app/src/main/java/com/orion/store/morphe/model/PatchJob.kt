@@ -81,12 +81,13 @@ data class PatchJob(
         )
     }
 
-    fun failed(reason: String): PatchJob {
+    fun failed(reason: String, outputApk: String? = null): PatchJob {
         JobStateMachine.assertLegalTransition(this.stage, JobStage.FAILED)
         return copy(
             stage = JobStage.FAILED,
             failureReason = reason,
             stageMessage = "Failed: $reason",
+            outputApkPath = outputApk ?: this.outputApkPath,
             updatedAt = System.currentTimeMillis()
         )
     }

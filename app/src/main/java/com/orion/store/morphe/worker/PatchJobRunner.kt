@@ -77,6 +77,7 @@ object PatchJobRunner {
                     packageName = currentJob.params.packageName,
                     appName = currentJob.params.appName,
                     requestedVersion = currentJob.params.targetVersion,
+                    sourcePath = currentJob.params.sourceApkPath,
                     targetDir = sessionDir
                 ) { stageMsg, pct ->
                     currentJob = currentJob.copy(stageMessage = stageMsg, progress = pct)
@@ -122,12 +123,36 @@ object PatchJobRunner {
                 JobStore.updateJob(currentJob)
 
                 // Resolve selected patches
+                val primaryBundle = currentJob.params.patchBundleId.trim()
+                val selectedIds = currentJob.params.selectedPatchIds.toSet()
                 val (specificPatches, universalPatches) = MorpheCatalogRepository.getPatchesForApp(currentJob.params.packageName)
                 val allPatches = specificPatches + universalPatches
-                val patchesToApply = if (currentJob.params.selectedPatchIds.isNotEmpty()) {
-                    allPatches.filter { currentJob.params.selectedPatchIds.contains(it.name) }.map {
+
+                val matchedPatches = if (selectedIds.isNotEmpty()) {
+                    allPatches.filter { patch ->
+                        val compositeKey = "${patch.bundleName}::${patch.name}"
+                        if (selectedIds.contains(compositeKey)) {
+                            true
+                        } else if (selectedIds.contains(patch.name)) {
+                            if (primaryBundle.isNotEmpty()) {
+                                patch.bundleName.equals(primaryBundle, ignoreCase = true)
+                            } else true
+                        } else false
+                    }
+                } else {
+                    emptyList()
+                }
+
+                val patchesToApply = if (matchedPatches.isNotEmpty()) {
+                    val prioritized = if (primaryBundle.isNotEmpty()) {
+                        matchedPatches.filter { it.bundleName.equals(primaryBundle, ignoreCase = true) } +
+                        matchedPatches.filter { !it.bundleName.equals(primaryBundle, ignoreCase = true) }
+                    } else {
+                        matchedPatches
+                    }
+                    prioritized.distinctBy { it.name.trim().lowercase() }.map {
                         MorphePatch(
-                            id = it.name.lowercase().replace(" ", "-"),
+                            id = "${it.bundleName.lowercase().replace(" ", "-")}-${it.name.lowercase().replace(" ", "-")}",
                             name = it.name,
                             description = it.description,
                             version = "1.0.0",
@@ -240,6 +265,7 @@ object PatchJobRunner {
                     JobStore.updateJob(failedJob)
                     return@launch
                 }
+                currentJob = currentJob.copy(outputApkPath = apkToInstall.absolutePath)
                 val allApksToInstall = listOf(apkToInstall) + signedSplits
 
                 // 6. INSTALLING (if autoInstall = true)
@@ -261,20 +287,26 @@ object PatchJobRunner {
                             if (status != android.content.pm.PackageInstaller.STATUS_SUCCESS) {
                                 val isConflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
                                     msg?.contains("signatures do not match", ignoreCase = true) == true ||
-                                    msg?.contains("INCOMPATIBLE", ignoreCase = true) == true
-                                val reason = if (isConflict) {
-                                    "Signature conflict: An existing version of ${currentJob.params.appName} is installed with a conflicting certificate (e.g. from Google Play). Please uninstall the original app first, then re-patch and install."
-                                } else {
-                                    "Installation failed (status $status): ${msg ?: "User cancelled or installation failed"}"
+                                    msg?.contains("INCOMPATIBLE", ignoreCase = true) == true ||
+                                    msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                                val isAborted = status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED ||
+                                    status == -1 ||
+                                    msg?.contains("cancelled", ignoreCase = true) == true ||
+                                    msg?.contains("aborted", ignoreCase = true) == true
+                                val reason = when {
+                                    isConflict -> "Signature or package conflict: An incompatible version of ${currentJob.params.appName} is installed on this device. Please uninstall the original app, then tap 'Install Built APK'."
+                                    isAborted -> "Installation was cancelled. The patched APK is ready; tap 'Install Built APK' to complete installation."
+                                    else -> "Installation failed (status $status): ${msg ?: "User cancelled or installation failed"}. The patched APK is ready; tap 'Install Built APK' to retry."
                                 }
-                                val failedJob = currentJob.failed(reason).withLog("[ERROR] $reason")
+                                val failedJob = currentJob.failed(reason, apkToInstall.absolutePath).withLog("[ERROR] $reason")
                                 JobStore.updateJob(failedJob)
                                 return@launch
                             }
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        val failedJob = currentJob.failed("Install error: ${e.message}").withLog("[ERROR] Install exception: ${e.message}")
+                        val failedJob = currentJob.failed("Install error: ${e.message}", apkToInstall.absolutePath)
+                            .withLog("[ERROR] Install exception: ${e.message}")
                         JobStore.updateJob(failedJob)
                         return@launch
                     }

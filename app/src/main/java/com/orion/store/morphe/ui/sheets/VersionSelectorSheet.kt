@@ -3,6 +3,10 @@ package com.orion.store.morphe.ui.sheets
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -53,6 +57,7 @@ fun VersionSelectorSheet(
 ) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val recommendedVersion = remember(app.compatibleVersions) {
         app.compatibleVersions.firstOrNull() ?: "Recommended"
@@ -65,17 +70,39 @@ fun VersionSelectorSheet(
     }
     var localFileUri by remember { mutableStateOf(currentChoice.localUri) }
     var localFileName by remember { mutableStateOf(currentChoice.localPath?.substringAfterLast("/") ?: "") }
+    var localFilePath by remember { mutableStateOf(currentChoice.localPath) }
 
     val filePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            localFileUri = uri
             val name = uri.lastPathSegment?.substringAfterLast("/") ?: "Selected Local APK"
+            localFileUri = uri
             localFileName = name
-            selectedType = VersionSelectionType.LOCAL_FILE
-            selectedVersion = "Local: $name"
-            vm.haptic(H.SELECTION)
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val dest = File(context.cacheDir, "picked_${app.packageName}_${System.currentTimeMillis()}.apk")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        java.io.FileOutputStream(dest).use { output -> input.copyTo(output) }
+                    }
+                    if (com.orion.store.platform.DownloadOrchestrator.isApkValid(dest)) {
+                        com.orion.store.platform.DownloadOrchestrator.cacheBaseApk(context, app.packageName, "Local", dest)
+                        withContext(Dispatchers.Main) {
+                            localFilePath = dest.absolutePath
+                            selectedType = VersionSelectionType.LOCAL_FILE
+                            selectedVersion = "Local: $name"
+                            vm.haptic(H.SELECTION)
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            vm.snackbar.showSnackbar("Selected file is corrupted or not a valid APK.")
+                            vm.haptic(H.ERROR)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
     }
 
@@ -291,7 +318,7 @@ fun VersionSelectorSheet(
                             type = selectedType,
                             versionName = selectedVersion,
                             localUri = localFileUri,
-                            localPath = localFileName.takeIf { it.isNotBlank() },
+                            localPath = localFilePath,
                             isPinned = isPinned
                         )
                     )

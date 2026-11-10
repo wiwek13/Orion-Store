@@ -75,7 +75,43 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
     val visible = rows.filter { it.matches(pageFilter) && it.matchesQuery(query) }
     val patchJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsState()
     val activePatchJobs = remember(patchJobs) { patchJobs.filter { it.stage.isActive } }
-    val failedPatchJobs = remember(patchJobs) { patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.FAILED } }
+    val failedPatchJobs = remember(patchJobs) {
+        val succeededPkgs = patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED }.map { it.params.packageName }.toSet()
+        patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.FAILED && it.params.packageName !in succeededPkgs }
+    }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var targetJobForProvide by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
+    val retryFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        val job = targetJobForProvide
+        if (uri != null && job != null) {
+            val name = uri.lastPathSegment?.substringAfterLast("/") ?: "selected.apk"
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val dest = java.io.File(context.cacheDir, "provided_${job.params.packageName}_${System.currentTimeMillis()}.apk")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        java.io.FileOutputStream(dest).use { output -> input.copyTo(output) }
+                    }
+                    if (com.orion.store.platform.DownloadOrchestrator.isApkValid(dest)) {
+                        com.orion.store.platform.DownloadOrchestrator.cacheBaseApk(context, job.params.packageName, "Local", dest)
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            vm.haptic(H.SUCCESS)
+                            vm.snackbar.showSnackbar("Loaded APK $name. Retrying patch...")
+                            com.orion.store.morphe.store.JobStore.retryJob(job.id, newSourcePath = dest.absolutePath)
+                        }
+                    } else {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            vm.snackbar.showSnackbar("Selected file is corrupted or not a valid APK.")
+                            vm.haptic(H.ERROR)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
     val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size
     val cs = MaterialTheme.colorScheme
     // Long-press an installed app to start picking, tap more to add them, then uninstall them together
@@ -125,7 +161,37 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                         }
                     }
                 }
+                if (failedPatchJobs.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Failed Patches (${failedPatchJobs.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = cs.error
+                        )
+                        TextButton(
+                            onClick = {
+                                vm.haptic(H.MEDIUM)
+                                failedPatchJobs.forEach { com.orion.store.morphe.store.JobStore.removeJob(it.id) }
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Clear All", style = MaterialTheme.typography.labelSmall, color = cs.error)
+                        }
+                    }
+                }
                 failedPatchJobs.forEach { job ->
+                    val builtApk = job.outputApkPath?.let { java.io.File(it) }?.takeIf { it.exists() && it.length() > 50_000 }
+                    val isInstalled = runCatching { context.packageManager.getPackageInfo(job.params.packageName, 0) }.isSuccess
+                    val isConflict = job.failureReason?.contains("conflict", ignoreCase = true) == true ||
+                        job.failureReason?.contains("signature", ignoreCase = true) == true ||
+                        job.failureReason?.contains("split", ignoreCase = true) == true ||
+                        job.failureReason?.contains("incompatible", ignoreCase = true) == true
+
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(16.dp),
@@ -138,8 +204,69 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                             Icon(Sym.Warning, null, Modifier.size(20.dp), tint = cs.onErrorContainer)
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
-                                Text("${job.params.appName} Patch Failed", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = cs.onErrorContainer)
+                                Text(
+                                    if (builtApk != null) "${job.params.appName} Build Ready" else "${job.params.appName} Patch Failed",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = cs.onErrorContainer
+                                )
                                 Text(job.failureReason ?: job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onErrorContainer)
+
+                                if (builtApk != null) {
+                                    Spacer(Modifier.height(8.dp))
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        if (isInstalled && isConflict) {
+                                            FilledTonalButton(
+                                                onClick = {
+                                                    vm.haptic(H.MEDIUM)
+                                                    vm.requestUninstall(job.params.packageName)
+                                                },
+                                                modifier = Modifier.height(34.dp),
+                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                                shapes = ButtonDefaults.shapes()
+                                            ) {
+                                                Icon(Sym.Delete, null, Modifier.size(14.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("Uninstall Original", style = MaterialTheme.typography.labelSmall)
+                                            }
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                vm.installPatchedApk(job)
+                                            },
+                                            modifier = Modifier.height(34.dp),
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                            shapes = ButtonDefaults.shapes()
+                                        ) {
+                                            Icon(Sym.FileDownload, null, Modifier.size(14.dp))
+                                            Spacer(Modifier.width(4.dp))
+                                            Text(if (isInstalled && isConflict) "Install Patched" else "Install Built APK", style = MaterialTheme.typography.labelSmall)
+                                        }
+                                    }
+                                } else if (job.failureReason?.contains("base APK", ignoreCase = true) == true) {
+                                    Spacer(Modifier.height(8.dp))
+                                    FilledTonalButton(
+                                        onClick = {
+                                            targetJobForProvide = job
+                                            retryFilePicker.launch(arrayOf(
+                                                "application/vnd.android.package-archive",
+                                                "application/octet-stream",
+                                                "*/*"
+                                            ))
+                                        },
+                                        modifier = Modifier.height(34.dp),
+                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                        shapes = ButtonDefaults.shapes()
+                                    ) {
+                                        Icon(Sym.FileDownload, null, Modifier.size(14.dp))
+                                        Spacer(Modifier.width(6.dp))
+                                        Text("Provide APK to Retry", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                }
                             }
                             IconButton(onClick = {
                                 vm.haptic(H.LIGHT)

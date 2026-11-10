@@ -451,12 +451,32 @@ fun MorpheSettingsPage(
                                                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                             )
                                             if (repo.isDefault) {
-                                                Badge(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer) {
-                                                    Text("Official", maxLines = 1, softWrap = false)
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = cs.primaryContainer
+                                                ) {
+                                                    Text(
+                                                        "Official",
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = cs.onPrimaryContainer,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
                                                 }
                                             } else if (repo.description.contains("MétaMorphe", true)) {
-                                                Badge(containerColor = cs.secondaryContainer, contentColor = cs.onSecondaryContainer) {
-                                                    Text("MétaMorphe", maxLines = 1, softWrap = false)
+                                                Surface(
+                                                    shape = RoundedCornerShape(6.dp),
+                                                    color = cs.secondaryContainer
+                                                ) {
+                                                    Text(
+                                                        "MétaMorphe",
+                                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        color = cs.onSecondaryContainer,
+                                                        maxLines = 1,
+                                                        softWrap = false
+                                                    )
                                                 }
                                             }
                                         }

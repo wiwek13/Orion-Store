@@ -345,8 +345,11 @@ object MorpheCatalogRepository {
         val (specifics, universals) = synchronized(appPatchesCache) {
             appPatchesCache[pkg] ?: (emptyList<MorpheCatalogPatch>() to _universalPatches.value)
         }
-        val dedupSpecifics = specifics.distinctBy { it.name.lowercase() }
-        val dedupUniversals = universals.distinctBy { it.name.lowercase() }
+        val dedupSpecifics = specifics.distinctBy { "${it.bundleName}::${it.name.trim().lowercase()}" }
+        val specificNames = dedupSpecifics.map { it.name.trim().lowercase() }.toSet()
+        val dedupUniversals = universals
+            .distinctBy { it.name.trim().lowercase() }
+            .filter { it.name.trim().lowercase() !in specificNames }
         return dedupSpecifics to dedupUniversals
     }
 

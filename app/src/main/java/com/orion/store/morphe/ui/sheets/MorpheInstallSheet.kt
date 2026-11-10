@@ -1,5 +1,12 @@
 package com.orion.store.morphe.ui.sheets
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -47,10 +54,10 @@ fun MorpheInstallSheet(
     }
 
     val specificPatches = remember(rawSpecificPatches) {
-        rawSpecificPatches.distinctBy { it.name.lowercase() }
+        rawSpecificPatches.distinctBy { "${it.bundleName}::${it.name.trim().lowercase()}" }
     }
     val universalPatches = remember(rawUniversalPatches) {
-        rawUniversalPatches.distinctBy { it.name.lowercase() }
+        rawUniversalPatches.distinctBy { "${it.bundleName}::${it.name.trim().lowercase()}" }
     }
 
     val specificBundles = remember(specificPatches) {
@@ -60,23 +67,27 @@ fun MorpheInstallSheet(
         universalPatches.groupBy { it.bundleName.ifEmpty { "Universal Patches" } }
     }
 
-    // Selected patch names - restored from saved selections or starts empty
+    // Selected patch names - restored from saved selections or starts with primary bundle defaults
     val selectedPatches = remember(app.packageName) {
         mutableStateListOf<String>()
     }
 
-    LaunchedEffect(app.packageName, specificPatches, universalPatches) {
-        val validPatchNames = (specificPatches.map { it.name } + universalPatches.map { it.name }).toSet()
+    LaunchedEffect(app.packageName, specificBundles, universalPatches) {
+        val validKeys = (specificPatches.map { "${it.bundleName}::${it.name}" } + universalPatches.map { "${it.bundleName}::${it.name}" }).toSet()
+        val validNames = (specificPatches.map { it.name } + universalPatches.map { it.name }).toSet()
         val saved = vm.s.savedPatchSelections[app.packageName]
         if (!saved.isNullOrEmpty() && selectedPatches.isEmpty()) {
-            selectedPatches.addAll(saved.filter { it in validPatchNames })
+            selectedPatches.addAll(saved.filter { it in validKeys || it in validNames })
         } else if (selectedPatches.isEmpty()) {
-            selectedPatches.addAll(specificPatches.filter { it.isDefault }.map { it.name })
-        }
-        val cleanSelection = selectedPatches.distinct().filter { it in validPatchNames }
-        if (cleanSelection.size != selectedPatches.size) {
-            selectedPatches.clear()
-            selectedPatches.addAll(cleanSelection)
+            // Select default patches only for the PRIMARY / FIRST bundle, never mix multiple mod bundles!
+            val primaryBundle = specificBundles.keys.firstOrNull()
+            if (primaryBundle != null) {
+                val defaults = specificBundles[primaryBundle]?.filter { it.isDefault } ?: emptyList()
+                selectedPatches.addAll(defaults.map { "${it.bundleName}::${it.name}" })
+            } else {
+                val defaults = universalPatches.filter { it.isDefault }
+                selectedPatches.addAll(defaults.map { "${it.bundleName}::${it.name}" })
+            }
         }
     }
 
@@ -104,6 +115,48 @@ fun MorpheInstallSheet(
         )
     }
     var showVersionSelector by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var isResolvingBase by remember { mutableStateOf(false) }
+    var resolveStageMsg by remember { mutableStateOf("") }
+    var showManualProvideDialog by remember { mutableStateOf(false) }
+
+    val directFilePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val name = uri.lastPathSegment?.substringAfterLast("/") ?: "Selected Local APK"
+            scope.launch(Dispatchers.IO) {
+                try {
+                    val dest = File(context.cacheDir, "picked_${app.packageName}_${System.currentTimeMillis()}.apk")
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(dest).use { output -> input.copyTo(output) }
+                    }
+                    if (com.orion.store.platform.DownloadOrchestrator.isApkValid(dest)) {
+                        com.orion.store.platform.DownloadOrchestrator.cacheBaseApk(context, app.packageName, "Local", dest)
+                        withContext(Dispatchers.Main) {
+                            versionChoice = VersionChoice(
+                                type = VersionSelectionType.LOCAL_FILE,
+                                versionName = "Local: $name",
+                                localUri = uri,
+                                localPath = dest.absolutePath,
+                                isPinned = true
+                            )
+                            showManualProvideDialog = false
+                            vm.haptic(H.SUCCESS)
+                            vm.snackbar.showSnackbar("Loaded local base APK: $name")
+                        }
+                    } else {
+                        withContext(Dispatchers.Main) {
+                            vm.snackbar.showSnackbar("Selected file is corrupted or not a valid APK.")
+                            vm.haptic(H.ERROR)
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
+    }
 
     // Search filter across specific and universal bundles
     val filteredSpecificBundles = remember(specificBundles, patchSearchQuery) {
@@ -237,6 +290,28 @@ fun MorpheInstallSheet(
                                 Text("Not Installed", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant, maxLines = 1)
                             }
                         }
+                        Surface(
+                            onClick = {
+                                directFilePicker.launch(arrayOf("application/vnd.android.package-archive", "*/*"))
+                                vm.haptic(H.LIGHT)
+                            },
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (versionChoice.type == VersionSelectionType.LOCAL_FILE) cs.primaryContainer else cs.surfaceContainerHigh
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Sym.FileDownload, null, Modifier.size(12.dp), tint = if (versionChoice.type == VersionSelectionType.LOCAL_FILE) cs.onPrimaryContainer else cs.onSurfaceVariant)
+                                Spacer(Modifier.width(3.dp))
+                                Text(
+                                    if (versionChoice.type == VersionSelectionType.LOCAL_FILE) "Local APK Loaded" else "Provide APK",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (versionChoice.type == VersionSelectionType.LOCAL_FILE) cs.onPrimaryContainer else cs.onSurfaceVariant,
+                                    maxLines = 1
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -334,24 +409,36 @@ fun MorpheInstallSheet(
                                 color = cs.primary
                             )
                             if (specificPatches.isNotEmpty()) {
-                                val allSpecific = specificPatches.map { it.name }.toSet()
-                                val allChecked = selectedPatches.containsAll(allSpecific)
+                                val firstBundle = specificBundles.keys.firstOrNull() ?: ""
+                                val hasAppPatchesSelected = selectedPatches.any { key ->
+                                    val bName = if (key.contains("::")) key.substringBefore("::") else ""
+                                    bName in specificBundles.keys
+                                }
                                 TextButton(
                                     onClick = {
-                                        if (allChecked) selectedPatches.removeAll(allSpecific)
-                                        else selectedPatches.addAll(allSpecific)
+                                        if (hasAppPatchesSelected) {
+                                            selectedPatches.removeAll { key ->
+                                                val bName = if (key.contains("::")) key.substringBefore("::") else ""
+                                                bName in specificBundles.keys
+                                            }
+                                        } else {
+                                            specificBundles[firstBundle]?.filter { it.isDefault }?.forEach { p ->
+                                                val k = "${p.bundleName}::${p.name}"
+                                                if (!selectedPatches.contains(k)) selectedPatches.add(k)
+                                            }
+                                        }
                                         vm.haptic(H.SELECTION)
                                     },
                                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                                 ) {
-                                    Text(if (allChecked) "Clear All" else "Select All")
+                                    Text(if (hasAppPatchesSelected) "Clear App Patches" else "Select Default ($firstBundle)")
                                 }
                             }
                         }
                     }
 
                     items(displaySpecificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
-                        val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.lowercase() } }
+                        val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.trim().lowercase() } }
                         val isExpanded = expandedBundles.contains(bundleName) || activeFilter == "Selected"
                         BundleAccordionCard(
                             bundleName = bundleName,
@@ -364,12 +451,25 @@ fun MorpheInstallSheet(
                                 vm.haptic(H.LIGHT)
                             },
                             onSelectAllInBundle = {
-                                dedupPatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
+                                // Clear other app-specific bundles so bytecode hooks from competing mod flavours don't conflict
+                                selectedPatches.removeAll { key ->
+                                    val bName = if (key.contains("::")) key.substringBefore("::") else ""
+                                    bName.isNotEmpty() && bName != bundleName && bName in specificBundles.keys
+                                }
+                                dedupPatches.forEach { p ->
+                                    val k = "${p.bundleName}::${p.name}"
+                                    if (!selectedPatches.contains(k)) selectedPatches.add(k)
+                                    selectedPatches.remove(p.name)
+                                }
                                 vm.haptic(H.SELECTION)
                             },
                             onClearAllInBundle = {
                                 val names = dedupPatches.map { it.name }.toSet()
-                                selectedPatches.removeAll(names)
+                                selectedPatches.removeAll { key ->
+                                    val kName = if (key.contains("::")) key.substringAfter("::") else key
+                                    val bName = if (key.contains("::")) key.substringBefore("::") else ""
+                                    (bName == bundleName && kName in names) || (bName.isEmpty() && key in names)
+                                }
                                 vm.haptic(H.SELECTION)
                             },
                             isUniversal = false
@@ -418,7 +518,7 @@ fun MorpheInstallSheet(
 
                     if (showUniversalSection || activeFilter == "Universal" || activeFilter == "Selected") {
                         items(displayUniversalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
-                            val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.lowercase() } }
+                            val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.trim().lowercase() } }
                             val isExpanded = expandedBundles.contains("univ-$bundleName") || activeFilter == "Selected"
                             BundleAccordionCard(
                                 bundleName = bundleName,
@@ -431,12 +531,20 @@ fun MorpheInstallSheet(
                                     vm.haptic(H.LIGHT)
                                 },
                                 onSelectAllInBundle = {
-                                    dedupPatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
+                                    dedupPatches.forEach { p ->
+                                        val k = "${p.bundleName}::${p.name}"
+                                        if (!selectedPatches.contains(k)) selectedPatches.add(k)
+                                        selectedPatches.remove(p.name)
+                                    }
                                     vm.haptic(H.SELECTION)
                                 },
                                 onClearAllInBundle = {
                                     val names = dedupPatches.map { it.name }.toSet()
-                                    selectedPatches.removeAll(names)
+                                    selectedPatches.removeAll { key ->
+                                        val kName = if (key.contains("::")) key.substringAfter("::") else key
+                                        val bName = if (key.contains("::")) key.substringBefore("::") else ""
+                                        (bName == bundleName && kName in names) || (bName.isEmpty() && key in names)
+                                    }
                                     vm.haptic(H.SELECTION)
                                 },
                                 isUniversal = true
@@ -487,44 +595,100 @@ fun MorpheInstallSheet(
 
                     Button(
                         onClick = {
-                            val params = PatchJobParams(
-                                id = java.util.UUID.randomUUID().toString(),
-                                packageName = app.packageName,
-                                appName = app.name,
-                                targetVersion = versionChoice.versionName,
-                                sourceApkPath = versionChoice.localPath,
-                                selectedPatchIds = selectedPatches.toList()
-                            )
-                            // Persist user's selected patches
-                            com.orion.store.ui.Store.settings.update { s ->
-                                s.copy(savedPatchSelections = s.savedPatchSelections + (app.packageName to selectedPatches.toList()))
-                            }
-                            JobStore.enqueue(params)
-                            vm.haptic(H.SUCCESS)
-                            onDismiss()
-                            scope.launch {
-                                vm.snackbar.showSnackbar(
-                                    message = "Started patching ${app.name} (${selectedPatches.size} patches)...",
-                                    withDismissAction = true
+                            val primaryBundle = selectedPatches
+                                .mapNotNull { if (it.contains("::")) it.substringBefore("::") else null }
+                                .filter { it in specificBundles.keys }
+                                .groupBy { it }
+                                .maxByOrNull { it.value.size }?.key
+                                ?: specificBundles.keys.firstOrNull() ?: ""
+
+                            if (versionChoice.type == VersionSelectionType.LOCAL_FILE ||
+                                com.orion.store.platform.DownloadOrchestrator.hasLocalBaseApk(context, app.packageName)
+                            ) {
+                                val params = PatchJobParams(
+                                    id = java.util.UUID.randomUUID().toString(),
+                                    packageName = app.packageName,
+                                    appName = app.name,
+                                    targetVersion = versionChoice.versionName,
+                                    sourceApkPath = versionChoice.localPath,
+                                    patchBundleId = primaryBundle,
+                                    selectedPatchIds = selectedPatches.toList()
                                 )
+                                com.orion.store.ui.Store.settings.update { s ->
+                                    s.copy(savedPatchSelections = s.savedPatchSelections + (app.packageName to selectedPatches.toList()))
+                                }
+                                JobStore.enqueue(params)
+                                vm.haptic(H.SUCCESS)
+                                onDismiss()
+                                scope.launch {
+                                    vm.snackbar.showSnackbar(
+                                        message = "Started patching ${app.name} (${selectedPatches.size} patches)...",
+                                        withDismissAction = true
+                                    )
+                                }
+                            } else {
+                                isResolvingBase = true
+                                resolveStageMsg = "Checking base APK..."
+                                scope.launch {
+                                    val tempDir = File(context.cacheDir, "precheck_${app.packageName}")
+                                    tempDir.mkdirs()
+                                    val resolved = com.orion.store.platform.DownloadOrchestrator.resolveAndDownload(
+                                        context = context,
+                                        packageName = app.packageName,
+                                        appName = app.name,
+                                        requestedVersion = versionChoice.versionName,
+                                        sourcePath = versionChoice.localPath,
+                                        targetDir = tempDir
+                                    ) { msg, _ ->
+                                        resolveStageMsg = msg
+                                    }
+                                    isResolvingBase = false
+                                    if (resolved != null && com.orion.store.platform.DownloadOrchestrator.isApkValid(resolved.baseApk)) {
+                                        val params = PatchJobParams(
+                                            id = java.util.UUID.randomUUID().toString(),
+                                            packageName = app.packageName,
+                                            appName = app.name,
+                                            targetVersion = versionChoice.versionName,
+                                            sourceApkPath = resolved.baseApk.absolutePath,
+                                            patchBundleId = primaryBundle,
+                                            selectedPatchIds = selectedPatches.toList()
+                                        )
+                                        com.orion.store.ui.Store.settings.update { s ->
+                                            s.copy(savedPatchSelections = s.savedPatchSelections + (app.packageName to selectedPatches.toList()))
+                                        }
+                                        JobStore.enqueue(params)
+                                        vm.haptic(H.SUCCESS)
+                                        onDismiss()
+                                        vm.snackbar.showSnackbar("Started patching ${app.name} (${selectedPatches.size} patches)...")
+                                    } else {
+                                        showManualProvideDialog = true
+                                        vm.haptic(H.ERROR)
+                                    }
+                                }
                             }
                         },
-                        enabled = selectedPatches.isNotEmpty(),
+                        enabled = selectedPatches.isNotEmpty() && !isResolvingBase,
                         modifier = Modifier
                             .height(48.dp)
                             .defaultMinSize(minWidth = 148.dp),
                         shape = RoundedCornerShape(24.dp),
                         contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
                     ) {
-                        Icon(Sym.Build, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Queue & Build",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            softWrap = false
-                        )
+                        if (isResolvingBase) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp, color = cs.onPrimary)
+                            Spacer(Modifier.width(8.dp))
+                            Text(resolveStageMsg.ifBlank { "Checking..." }, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                        } else {
+                            Icon(Sym.Build, null, Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Queue & Build",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
             }
@@ -542,6 +706,39 @@ fun MorpheInstallSheet(
             onDismiss = { showVersionSelector = false }
         )
     }
+
+    if (showManualProvideDialog) {
+        AlertDialog(
+            onDismissRequest = { showManualProvideDialog = false },
+            title = { Text("Base APK Required") },
+            text = {
+                Text(
+                    "Could not find a base APK for ${app.name} online across repositories.\n\n" +
+                    "Please select an APK or XAPK file from your device storage to continue. " +
+                    "All your ${selectedPatches.size} selected patches are preserved.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        directFilePicker.launch(arrayOf(
+                            "application/vnd.android.package-archive",
+                            "application/octet-stream",
+                            "*/*"
+                        ))
+                    }
+                ) {
+                    Text("Select APK File")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManualProvideDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -556,8 +753,11 @@ private fun BundleAccordionCard(
     isUniversal: Boolean = false
 ) {
     val cs = MaterialTheme.colorScheme
-    val selectedInThisBundle = remember(selectedPatches.size, patches) {
-        patches.count { selectedPatches.contains(it.name) }
+    val selectedInThisBundle = remember(selectedPatches.toList(), patches) {
+        patches.count { p ->
+            val k = "${p.bundleName}::${p.name}"
+            selectedPatches.contains(k) || (selectedPatches.contains(p.name) && !selectedPatches.any { it.contains("::") })
+        }
     }
     val allSelected = selectedInThisBundle == patches.size && patches.isNotEmpty()
     val turn by androidx.compose.animation.core.animateFloatAsState(if (isExpanded) 180f else 0f, label = "turn")
@@ -641,14 +841,20 @@ private fun BundleAccordionCard(
                     verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     patches.forEach { patch ->
-                        val isChecked = selectedPatches.contains(patch.name)
+                        val patchKey = "${patch.bundleName}::${patch.name}"
+                        val isChecked = selectedPatches.contains(patchKey) || (selectedPatches.contains(patch.name) && !selectedPatches.any { it.contains("::") })
                         Row(
                             Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(10.dp))
                                 .clickable {
-                                    if (isChecked) selectedPatches.remove(patch.name)
-                                    else selectedPatches.add(patch.name)
+                                    if (isChecked) {
+                                        selectedPatches.remove(patchKey)
+                                        selectedPatches.remove(patch.name)
+                                    } else {
+                                        selectedPatches.add(patchKey)
+                                        selectedPatches.remove(patch.name)
+                                    }
                                 }
                                 .padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -656,8 +862,13 @@ private fun BundleAccordionCard(
                             Checkbox(
                                 checked = isChecked,
                                 onCheckedChange = { checked ->
-                                    if (checked) selectedPatches.add(patch.name)
-                                    else selectedPatches.remove(patch.name)
+                                    if (checked) {
+                                        selectedPatches.add(patchKey)
+                                        selectedPatches.remove(patch.name)
+                                    } else {
+                                        selectedPatches.remove(patchKey)
+                                        selectedPatches.remove(patch.name)
+                                    }
                                 }
                             )
                             Spacer(Modifier.width(8.dp))

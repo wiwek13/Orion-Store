@@ -39,7 +39,31 @@ object JobStore {
             val file = storageFile
             if (file.exists() && file.length() > 0L) {
                 val list = json.decodeFromString<List<PatchJob>>(file.readText())
-                _jobs.value = list
+                // Prune duplicate or stale failed jobs for apps that already succeeded
+                val succeededPkgs = list.filter { it.stage == JobStage.SUCCEEDED }.map { it.params.packageName }.toSet()
+                val cleaned = list.filterNot { it.stage == JobStage.FAILED && it.params.packageName in succeededPkgs }
+
+                // Recover outputApkPath for any failed job if the patched APK is present on disk
+                val recovered = cleaned.map { job ->
+                    if (job.outputApkPath == null || !File(job.outputApkPath).exists()) {
+                        val sessionDir = File(OrionApp.instance.cacheDir, "patcher_session/${job.params.packageName}")
+                        val foundInSession = sessionDir.listFiles()?.mapNotNull { sDir ->
+                            File(sDir, "patched_output.apk").takeIf { it.exists() && it.length() > 50_000 }
+                        }?.maxByOrNull { it.lastModified() }
+
+                        val publicDownloads = com.orion.store.platform.Downloads.dir()
+                        val foundInDownloads = publicDownloads?.listFiles()?.firstOrNull { f ->
+                            f.name.startsWith("Patched_") && f.name.contains(job.params.packageName, ignoreCase = true) && f.length() > 50_000
+                        }
+
+                        val target = foundInSession ?: foundInDownloads
+                        if (target != null) {
+                            job.copy(outputApkPath = target.absolutePath)
+                        } else job
+                    } else job
+                }
+
+                _jobs.value = recovered
                 recalculateActive()
             }
         } catch (e: Exception) {
@@ -70,7 +94,10 @@ object JobStore {
             progress = 0,
             stageMessage = "Waiting in queue..."
         )
-        _jobs.update { listOf(job) + it }
+        // Automatically clear any older failed jobs for the same package
+        _jobs.update { list ->
+            listOf(job) + list.filterNot { it.params.packageName == params.packageName && it.stage == JobStage.FAILED }
+        }
         recalculateActive()
         try {
             com.orion.store.morphe.worker.PatchJobRunner.runJob(job, com.orion.store.OrionApp.instance)
@@ -82,7 +109,13 @@ object JobStore {
 
     fun updateJob(updated: PatchJob) {
         _jobs.update { list ->
-            list.map { if (it.id == updated.id) updated else it }
+            if (updated.stage == JobStage.SUCCEEDED) {
+                // When an app succeeds, prune any older failed jobs for this package
+                list.filterNot { it.id != updated.id && it.params.packageName == updated.params.packageName && it.stage == JobStage.FAILED }
+                    .map { if (it.id == updated.id) updated else it }
+            } else {
+                list.map { if (it.id == updated.id) updated else it }
+            }
         }
         recalculateActive()
     }
@@ -109,21 +142,33 @@ object JobStore {
         removeJob(id)
     }
 
-    fun retryJob(id: String) {
+    fun retryJob(id: String, newSourcePath: String? = null) {
+        var jobToRun: PatchJob? = null
         _jobs.update { list ->
             list.map {
                 if (it.id == id && (it.stage == JobStage.FAILED || it.stage == JobStage.CANCELLED)) {
-                    it.copy(
+                    val updatedParams = if (newSourcePath != null) it.params.copy(sourceApkPath = newSourcePath) else it.params
+                    val retried = it.copy(
+                        params = updatedParams,
                         stage = JobStage.QUEUED,
                         progress = 0,
                         stageMessage = "Retrying job...",
                         failureReason = null,
                         updatedAt = System.currentTimeMillis()
                     )
+                    jobToRun = retried
+                    retried
                 } else it
             }
         }
         recalculateActive()
+        jobToRun?.let { job ->
+            try {
+                com.orion.store.morphe.worker.PatchJobRunner.runJob(job, com.orion.store.OrionApp.instance)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     fun deleteJob(id: String) {
