@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.orion.store.platform.DownloadOrchestrator
 import com.orion.store.platform.PatchStorageCleaner
+import com.orion.store.morphe.model.PatchJobParams
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -111,5 +112,44 @@ class DownloadOrchestratorTest {
 
         assertFalse("Older patched build must be automatically cleaned", oldPatched.exists())
         assertTrue("Latest patched build must be kept", newPatched.exists())
+    }
+
+    @Test
+    fun `test JobStore removeJob deletes job so cross button dismisses it`() {
+        val params = PatchJobParams(
+            id = "test-job-dismiss",
+            packageName = "com.test.app",
+            appName = "Test App"
+        )
+        val job = com.orion.store.morphe.store.JobStore.enqueue(params)
+        // Mark failed
+        com.orion.store.morphe.store.JobStore.updateJob(job.failed("Test error"))
+
+        assertTrue("Failed job should exist in JobStore", com.orion.store.morphe.store.JobStore.jobs.value.any { it.id == "test-job-dismiss" })
+
+        // Dismiss via removeJob (invoked by cross button)
+        com.orion.store.morphe.store.JobStore.removeJob("test-job-dismiss")
+
+        assertFalse("Failed job must be removed from JobStore when dismissed", com.orion.store.morphe.store.JobStore.jobs.value.any { it.id == "test-job-dismiss" })
+    }
+
+    @Test
+    fun `test resolve boost for reddit from github releases`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val targetDir = File("build/test_temp/boost").apply { mkdirs() }
+
+        val resolved = DownloadOrchestrator.resolveAndDownload(
+            context = context,
+            packageName = "com.rubenmayayo.reddit",
+            appName = "Boost for Reddit",
+            requestedVersion = "1.14.3",
+            targetDir = targetDir
+        ) { stage, pct ->
+            println("[TEST BOOST] $stage ($pct%)")
+        }
+
+        assertNotNull("Should resolve Boost APK from GitHub", resolved)
+        assertTrue("Base APK should be valid", DownloadOrchestrator.isApkValid(resolved!!.baseApk))
+        println("[TEST BOOST] Success: ${resolved.baseApk.absolutePath} (${resolved.baseApk.length()} bytes)")
     }
 }

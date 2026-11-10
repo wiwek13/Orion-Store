@@ -98,6 +98,17 @@ object JobStore {
         recalculateActive()
     }
 
+    fun removeJob(id: String) {
+        _jobs.update { list ->
+            list.filter { it.id != id }
+        }
+        recalculateActive()
+    }
+
+    fun dismissJob(id: String) {
+        removeJob(id)
+    }
+
     fun retryJob(id: String) {
         _jobs.update { list ->
             list.map {

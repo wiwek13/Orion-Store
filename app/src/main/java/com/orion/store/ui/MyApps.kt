@@ -141,7 +141,10 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                                 Text("${job.params.appName} Patch Failed", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = cs.onErrorContainer)
                                 Text(job.failureReason ?: job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onErrorContainer)
                             }
-                            IconButton(onClick = { com.orion.store.morphe.store.JobStore.cancelJob(job.id) }) {
+                            IconButton(onClick = {
+                                vm.haptic(H.LIGHT)
+                                com.orion.store.morphe.store.JobStore.removeJob(job.id)
+                            }) {
                                 Icon(Sym.Close, "Dismiss", tint = cs.onErrorContainer)
                             }
                         }

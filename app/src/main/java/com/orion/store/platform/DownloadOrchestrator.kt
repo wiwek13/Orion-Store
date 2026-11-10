@@ -262,29 +262,47 @@ object DownloadOrchestrator {
         return try {
             val repoSlug = when (packageName) {
                 "com.brave.browser" -> "brave/brave-browser"
+                "com.rubenmayayo.reddit" -> "rubenmayayo/boost-for-reddit"
                 else -> null
             } ?: return null
 
             onProgress("Checking GitHub releases for $repoSlug...", 22)
-            val apiUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
-            val req = Request.Builder().url(apiUrl).header("User-Agent", "OrionStore").build()
-            val resp = downloadClient.newCall(req).execute()
+            val cleanVer = versionName.trim().removePrefix("v")
+            val isSpecificVer = cleanVer.isNotBlank() && cleanVer != "recommended" && cleanVer != "latest"
+
+            val apiUrl = if (isSpecificVer) {
+                "https://api.github.com/repos/$repoSlug/releases/tags/v$cleanVer"
+            } else {
+                "https://api.github.com/repos/$repoSlug/releases/latest"
+            }
+
+            var resp = downloadClient.newCall(Request.Builder().url(apiUrl).header("User-Agent", "OrionStore").build()).execute()
+            if (!resp.isSuccessful && isSpecificVer) {
+                resp = downloadClient.newCall(Request.Builder().url("https://api.github.com/repos/$repoSlug/releases/tags/$cleanVer").header("User-Agent", "OrionStore").build()).execute()
+                if (!resp.isSuccessful) {
+                    resp = downloadClient.newCall(Request.Builder().url("https://api.github.com/repos/$repoSlug/releases/latest").header("User-Agent", "OrionStore").build()).execute()
+                }
+            }
             val body = resp.body?.string() ?: return null
 
             val jsonElement = json.parseToJsonElement(body)
             val assets = (jsonElement as? JsonObject)?.get("assets") as? JsonArray ?: return null
-            val apkAsset = assets.firstOrNull { elem ->
+            val apkAsset = (assets.firstOrNull { elem ->
                 val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
                 name.endsWith(".apk") && (name.contains("arm64") || name.contains("monoarm64"))
-            } as? JsonObject ?: return null
+            } ?: assets.firstOrNull { elem ->
+                val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
+                name.endsWith(".apk") && !name.contains("x86")
+            }) as? JsonObject ?: return null
 
             val dlUrl = apkAsset["browser_download_url"]?.toString()?.trim('"') ?: return null
             val targetFile = File(targetDir, "github_${packageName}.apk")
             if (downloadFile(dlUrl, targetFile, onProgress, 25, 45) && isApkValid(targetFile)) {
-                return normalizeApkBundle(targetFile, targetDir, "GitHub Releases ($repoSlug)", versionName)
+                return normalizeApkBundle(targetFile, targetDir, "GitHub Releases ($repoSlug)", versionName.ifBlank { "Latest" })
             }
             null
         } catch (e: Exception) {
+            android.util.Log.e("DownloadOrchestrator", "resolveFromGitHubReleases error: ${e.message}", e)
             null
         }
     }
