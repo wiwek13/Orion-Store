@@ -49,15 +49,33 @@ object SessionInstall {
         if (sessions[id] == null && id !in confirm) return false
         val status = i.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION && id in confirm) {
-            @Suppress("DEPRECATION")
-            val next = if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra("android.content.pm.extra.INTENT", Intent::class.java) else i.getParcelableExtra("android.content.pm.extra.INTENT")
+            val next = if (Build.VERSION.SDK_INT >= 33) {
+                i.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                    ?: i.getParcelableExtra("android.content.pm.extra.INTENT", Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                (i.getParcelableExtra(Intent.EXTRA_INTENT) as? Intent)
+                    ?: (i.getParcelableExtra("android.content.pm.extra.INTENT") as? Intent)
+            }
             if (next != null) {
                 next.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                runCatching { ctx.startActivity(next) }.onFailure { sessions[id]?.complete(status to "Android asked to confirm the install.") }
-                return true
+                val started = runCatching { ctx.startActivity(next) }.isSuccess
+                if (started) {
+                    // System install dialog popped up on screen! Keep session active and wait for user's action.
+                    return true
+                }
             }
+            runCatching { ctx.packageManager.packageInstaller.abandonSession(id) }
+            confirm -= id
+            sessions[id]?.complete(PackageInstaller.STATUS_FAILURE to "Android requested user confirmation, but the prompt could not be displayed.")
+            return true
         }
-        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) runCatching { ctx.packageManager.packageInstaller.abandonSession(id) }
+        if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+            runCatching { ctx.packageManager.packageInstaller.abandonSession(id) }
+            confirm -= id
+            sessions[id]?.complete(status to "Pending user confirmation")
+            return true
+        }
         confirm -= id
         sessions[id]?.complete(status to i.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE))
         return true
