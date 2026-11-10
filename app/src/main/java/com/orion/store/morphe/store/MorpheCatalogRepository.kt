@@ -128,6 +128,10 @@ object MorpheCatalogRepository {
                 if (metaBundles.isNotEmpty()) {
                     mergeMetaMorpheRegistry(metaBundles)
                 }
+                val allBundles = MetaMorpheScraper.scrapeAllBundles()
+                if (allBundles.isNotEmpty()) {
+                    mergeMetaMorpheBundles(allBundles)
+                }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
@@ -362,6 +366,124 @@ object MorpheCatalogRepository {
                 }
             }
         }
+        _apps.value = currentApps
+    }
+
+    private fun mergeMetaMorpheBundles(bundles: List<com.orion.store.morphe.engine.PatchBundle>) {
+        val currentApps = _apps.value.toMutableList()
+        val appIndexMap = mutableMapOf<String, Int>()
+        currentApps.forEachIndexed { index, app -> appIndexMap[app.packageName] = index }
+        val removed = com.orion.store.ui.Store.settings.value.morpheRemovedRepoUrls
+
+        val newAppPatches = mutableMapOf<String, MutableList<MorpheCatalogPatch>>()
+        val newAppVersions = mutableMapOf<String, MutableSet<String>>()
+        val newAppBundles = mutableMapOf<String, MutableSet<String>>()
+
+        for (bundle in bundles) {
+            if (bundle.repositoryUrl in removed || bundle.name in removed || bundle.id in removed) continue
+
+            for (patch in bundle.patches) {
+                if (patch.isUniversal || patch.compatiblePackages.isEmpty()) {
+                    // Universal patch
+                    val isDup = _universalPatches.value.any { it.name.equals(patch.name, ignoreCase = true) }
+                    if (!isDup) {
+                        _universalPatches.value = _universalPatches.value + MorpheCatalogPatch(
+                            name = patch.name,
+                            description = patch.description,
+                            isDefault = patch.enabledByDefault,
+                            isUniversal = true,
+                            bundleName = bundle.name,
+                            bundleAuthor = bundle.author
+                        )
+                    }
+                } else {
+                    for (pkg in patch.compatiblePackages) {
+                        newAppBundles.getOrPut(pkg) { mutableSetOf() }.add(bundle.name)
+                        if (patch.compatibleVersions.isNotEmpty()) {
+                            newAppVersions.getOrPut(pkg) { mutableSetOf() }.addAll(patch.compatibleVersions)
+                        }
+
+                        val catalogPatch = MorpheCatalogPatch(
+                            name = patch.name,
+                            description = patch.description,
+                            isDefault = patch.enabledByDefault,
+                            isUniversal = false,
+                            bundleName = bundle.name,
+                            bundleAuthor = bundle.author,
+                            compatiblePackages = listOf(pkg),
+                            targetVersions = patch.compatibleVersions
+                        )
+                        newAppPatches.getOrPut(pkg) { mutableListOf() }.add(catalogPatch)
+                    }
+                }
+            }
+        }
+
+        // Update patches cache
+        synchronized(appPatchesCache) {
+            for ((pkg, patches) in newAppPatches) {
+                val existing = appPatchesCache[pkg]
+                val existingPatches = existing?.first ?: emptyList()
+                val seenNames = existingPatches.map { "${it.bundleName}:${it.name}" }.toMutableSet()
+                val mergedList = existingPatches.toMutableList()
+
+                for (p in patches) {
+                    if (seenNames.add("${p.bundleName}:${p.name}")) {
+                        mergedList.add(p)
+                    }
+                }
+                appPatchesCache[pkg] = mergedList to _universalPatches.value
+            }
+        }
+
+        // Merge or create apps keyed strictly by packageName
+        for ((pkg, bundlesSet) in newAppBundles) {
+            val idx = appIndexMap[pkg]
+            val specificPatches = synchronized(appPatchesCache) { appPatchesCache[pkg]?.first ?: emptyList() }
+            val vers = newAppVersions[pkg]?.toList() ?: emptyList()
+
+            if (idx != null) {
+                val app = currentApps[idx]
+                val allBundles = (app.bundleNames.toSet() + bundlesSet).toList()
+                val allVers = (app.compatibleVersions.toSet() + vers).toList()
+                currentApps[idx] = app.copy(
+                    patchCount = specificPatches.size,
+                    bundleCount = allBundles.size,
+                    bundleNames = allBundles,
+                    compatibleVersions = allVers
+                )
+            } else {
+                // Discover human-readable name from package
+                val simpleName = when {
+                    pkg.contains("instagram", ignoreCase = true) -> "Instagram"
+                    pkg.contains("youtube", ignoreCase = true) -> "YouTube"
+                    pkg.contains("twitter", ignoreCase = true) || pkg.contains("x.android", ignoreCase = true) -> "Twitter / X"
+                    pkg.contains("reddit", ignoreCase = true) -> "Reddit"
+                    pkg.contains("spotify", ignoreCase = true) -> "Spotify"
+                    pkg.contains("tiktok", ignoreCase = true) -> "TikTok"
+                    else -> pkg.substringAfterLast(".").replaceFirstChar { it.uppercase() }
+                }
+
+                val newApp = MorpheCatalogApp(
+                    packageName = pkg,
+                    name = simpleName,
+                    category = "Social & Media",
+                    iconUrl = "https://icon.horse/icon/$pkg",
+                    description = "Morphe-compatible app with ${specificPatches.size} patches across ${bundlesSet.size} bundles",
+                    compatibleVersions = vers,
+                    patchCount = specificPatches.size,
+                    bundleCount = bundlesSet.size,
+                    bundleNames = bundlesSet.toList(),
+                    firstSeen = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis()
+                )
+                appIndexMap[pkg] = currentApps.size
+                currentApps.add(newApp)
+            }
+        }
+
+        // Sort apps: apps with specific patches first, then by installs
+        currentApps.sortWith(compareByDescending<MorpheCatalogApp> { it.patchCount > 0 }.thenByDescending { it.installs })
         _apps.value = currentApps
     }
 }

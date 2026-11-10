@@ -95,6 +95,60 @@ fun MorpheSettingsPage(
                 }
             }
 
+            // Background Auto-Patching & Updates Section
+            Text("Background Auto-Patching & Updates", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+            Surface(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                color = cs.surfaceContainerHigh
+            ) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Auto-patch updates in background", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Automatically re-patch installed apps when community patch bundles or recommended APKs update",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = s.autoPatchGlobal,
+                            onCheckedChange = { checked ->
+                                vm.haptic(H.SELECTION)
+                                vm.set { it.copy(autoPatchGlobal = checked) }
+                            }
+                        )
+                    }
+
+                    HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.5f))
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Auto-install patched builds", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Install silently via Shizuku, Dhizuku, Root, or system session without manual prompts",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = s.autoInstallPatchedGlobal,
+                            onCheckedChange = { checked ->
+                                vm.haptic(H.SELECTION)
+                                vm.set { it.copy(autoInstallPatchedGlobal = checked) }
+                            }
+                        )
+                    }
+                }
+            }
+
             // Patching Engine Section
             Text("Patching Engine", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(

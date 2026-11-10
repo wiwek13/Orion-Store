@@ -51,9 +51,16 @@ fun MorpheInstallSheet(
         universalPatches.groupBy { it.bundleName.ifEmpty { "Universal Patches" } }
     }
 
-    // Selected patch names - starts EMPTY by default so user has full control
+    // Selected patch names - restored from saved selections or starts empty
     val selectedPatches = remember(app.packageName) {
         mutableStateListOf<String>()
+    }
+
+    LaunchedEffect(app.packageName) {
+        val saved = vm.s.savedPatchSelections[app.packageName]
+        if (!saved.isNullOrEmpty() && selectedPatches.isEmpty()) {
+            selectedPatches.addAll(saved)
+        }
     }
 
     // Expand state: ALL bundles COLLAPSED by default
@@ -62,9 +69,24 @@ fun MorpheInstallSheet(
     }
     var showUniversalSection by remember { mutableStateOf(false) }
     var patchSearchQuery by remember { mutableStateOf("") }
+    var activeFilter by remember { mutableStateOf("All") } // "All", "App-Specific", "Universal", "Selected"
 
     val installedVersion = vm.s.installedVersions[app.packageName]
-    val recommendedVersion = app.compatibleVersions.firstOrNull() ?: installedVersion ?: "Latest"
+    val recommendedVersion = app.compatibleVersions.firstOrNull() ?: installedVersion ?: "Recommended"
+
+    val isPinnedInitial = vm.s.pinnedAppVersions.containsKey(app.packageName)
+    val initialVersion = vm.s.pinnedAppVersions[app.packageName] ?: recommendedVersion
+
+    var versionChoice by remember {
+        mutableStateOf(
+            VersionChoice(
+                type = if (isPinnedInitial) VersionSelectionType.SPECIFIC else VersionSelectionType.RECOMMENDED,
+                versionName = initialVersion,
+                isPinned = isPinnedInitial
+            )
+        )
+    }
+    var showVersionSelector by remember { mutableStateOf(false) }
 
     // Search filter across specific and universal bundles
     val filteredSpecificBundles = remember(specificBundles, patchSearchQuery) {
@@ -90,6 +112,29 @@ fun MorpheInstallSheet(
                     it.bundleName.contains(patchSearchQuery, ignoreCase = true)
                 }
             }.filterValues { it.isNotEmpty() }
+        }
+    }
+
+    // Apply 4-way filter pills (All, App-Specific, Universal, Selected)
+    val displaySpecificBundles = remember(filteredSpecificBundles, activeFilter, selectedPatches.size) {
+        if (activeFilter == "Universal") emptyMap()
+        else if (activeFilter == "Selected") {
+            filteredSpecificBundles.mapValues { (_, patches) ->
+                patches.filter { selectedPatches.contains(it.name) }
+            }.filterValues { it.isNotEmpty() }
+        } else {
+            filteredSpecificBundles
+        }
+    }
+
+    val displayUniversalBundles = remember(filteredUniversalBundles, activeFilter, selectedPatches.size) {
+        if (activeFilter == "App-Specific") emptyMap()
+        else if (activeFilter == "Selected") {
+            filteredUniversalBundles.mapValues { (_, patches) ->
+                patches.filter { selectedPatches.contains(it.name) }
+            }.filterValues { it.isNotEmpty() }
+        } else {
+            filteredUniversalBundles
         }
     }
 
@@ -147,8 +192,24 @@ fun MorpheInstallSheet(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Surface(shape = RoundedCornerShape(8.dp), color = cs.secondaryContainer) {
-                            Text("Target v$recommendedVersion", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = cs.onSecondaryContainer, maxLines = 1)
+                        Surface(
+                            onClick = { showVersionSelector = true; vm.haptic(H.LIGHT) },
+                            shape = RoundedCornerShape(8.dp),
+                            color = cs.secondaryContainer
+                        ) {
+                            Row(
+                                Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("v${versionChoice.versionName}", style = MaterialTheme.typography.labelSmall, color = cs.onSecondaryContainer, maxLines = 1)
+                                if (versionChoice.isPinned) {
+                                    Spacer(Modifier.width(3.dp))
+                                    Icon(Sym.Lock, "Pinned", Modifier.size(11.dp), tint = cs.onSecondaryContainer)
+                                } else {
+                                    Spacer(Modifier.width(3.dp))
+                                    Icon(Sym.ArrowDropDown, "Select version", Modifier.size(14.dp), tint = cs.onSecondaryContainer)
+                                }
+                            }
                         }
                         if (installedVersion != null) {
                             Surface(shape = RoundedCornerShape(8.dp), color = cs.tertiaryContainer) {
@@ -203,6 +264,34 @@ fun MorpheInstallSheet(
                 )
             )
 
+            Spacer(Modifier.height(8.dp))
+
+            // 4-Way Filter Pills from MorpheFlow: All, App-Specific, Universal, Selected
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf("All", "App-Specific", "Universal", "Selected").forEach { pill ->
+                    val isPillSelected = activeFilter == pill
+                    FilterChip(
+                        selected = isPillSelected,
+                        onClick = { activeFilter = pill; vm.haptic(H.SELECTION) },
+                        label = {
+                            val count = when (pill) {
+                                "All" -> specificPatches.size + universalPatches.size
+                                "App-Specific" -> specificPatches.size
+                                "Universal" -> universalPatches.size
+                                "Selected" -> selectedPatches.size
+                                else -> 0
+                            }
+                            Text("$pill ($count)", style = MaterialTheme.typography.labelSmall)
+                        },
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                }
+            }
+
             Spacer(Modifier.height(10.dp))
 
             // Patch selection list grouped by Bundle
@@ -214,54 +303,38 @@ fun MorpheInstallSheet(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Section: App-Specific Bundles
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "App Bundles (${filteredSpecificBundles.size}) · ${specificPatches.size} patches",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.primary
-                        )
-                        if (specificPatches.isNotEmpty()) {
-                            val allSpecific = specificPatches.map { it.name }.toSet()
-                            val allChecked = selectedPatches.containsAll(allSpecific)
-                            TextButton(
-                                onClick = {
-                                    if (allChecked) selectedPatches.removeAll(allSpecific)
-                                    else selectedPatches.addAll(allSpecific)
-                                    vm.haptic(H.SELECTION)
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(if (allChecked) "Clear All" else "Select All")
+                if (displaySpecificBundles.isNotEmpty()) {
+                    item {
+                        Row(
+                            Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "App Bundles (${displaySpecificBundles.size}) · ${specificPatches.size} patches",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = cs.primary
+                            )
+                            if (specificPatches.isNotEmpty()) {
+                                val allSpecific = specificPatches.map { it.name }.toSet()
+                                val allChecked = selectedPatches.containsAll(allSpecific)
+                                TextButton(
+                                    onClick = {
+                                        if (allChecked) selectedPatches.removeAll(allSpecific)
+                                        else selectedPatches.addAll(allSpecific)
+                                        vm.haptic(H.SELECTION)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(if (allChecked) "Clear All" else "Select All")
+                                }
                             }
                         }
                     }
-                }
 
-                if (filteredSpecificBundles.isEmpty()) {
-                    item {
-                        Surface(
-                            Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(14.dp),
-                            color = cs.surfaceContainerHigh
-                        ) {
-                            Text(
-                                if (patchSearchQuery.isNotBlank()) "No patches matching \"$patchSearchQuery\" in app bundles."
-                                else "No app-specific bundles found. Universal patches below can still be applied.",
-                                modifier = Modifier.padding(14.dp),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = cs.onSurfaceVariant
-                            )
-                        }
-                    }
-                } else {
-                    items(filteredSpecificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
-                        val isExpanded = expandedBundles.contains(bundleName)
+                    items(displaySpecificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
+                        val isExpanded = expandedBundles.contains(bundleName) || activeFilter == "Selected"
                         BundleAccordionCard(
                             bundleName = bundleName,
                             patches = bundlePatches,
@@ -284,10 +357,26 @@ fun MorpheInstallSheet(
                             isUniversal = false
                         )
                     }
+                } else if (activeFilter == "App-Specific" || (activeFilter == "All" && displayUniversalBundles.isEmpty())) {
+                    item {
+                        Surface(
+                            Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(14.dp),
+                            color = cs.surfaceContainerHigh
+                        ) {
+                            Text(
+                                if (patchSearchQuery.isNotBlank()) "No patches matching \"$patchSearchQuery\" in app bundles."
+                                else "No app-specific bundles found. Universal patches below can still be applied.",
+                                modifier = Modifier.padding(14.dp),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
 
                 // Section: Universal Bundles (Collapsible)
-                if (filteredUniversalBundles.isNotEmpty()) {
+                if (displayUniversalBundles.isNotEmpty()) {
                     item {
                         Row(
                             Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp),
@@ -295,7 +384,7 @@ fun MorpheInstallSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Universal Bundles (${filteredUniversalBundles.size}) · ${universalPatches.size} patches",
+                                "Universal Bundles (${displayUniversalBundles.size}) · ${universalPatches.size} patches",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = cs.secondary
@@ -304,14 +393,14 @@ fun MorpheInstallSheet(
                                 onClick = { showUniversalSection = !showUniversalSection },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                             ) {
-                                Text(if (showUniversalSection) "Hide Universal" else "Show Universal")
+                                Text(if (showUniversalSection || activeFilter == "Universal") "Hide Universal" else "Show Universal")
                             }
                         }
                     }
 
-                    if (showUniversalSection) {
-                        items(filteredUniversalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
-                            val isExpanded = expandedBundles.contains("univ-$bundleName")
+                    if (showUniversalSection || activeFilter == "Universal" || activeFilter == "Selected") {
+                        items(displayUniversalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
+                            val isExpanded = expandedBundles.contains("univ-$bundleName") || activeFilter == "Selected"
                             BundleAccordionCard(
                                 bundleName = bundleName,
                                 patches = bundlePatches,
@@ -368,7 +457,7 @@ fun MorpheInstallSheet(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            "Target: v$recommendedVersion",
+                            "Target: v${versionChoice.versionName}" + if (versionChoice.isPinned) " (Pinned)" else "",
                             style = MaterialTheme.typography.bodySmall,
                             color = cs.onSurfaceVariant,
                             maxLines = 1,
@@ -383,9 +472,14 @@ fun MorpheInstallSheet(
                                 id = java.util.UUID.randomUUID().toString(),
                                 packageName = app.packageName,
                                 appName = app.name,
-                                targetVersion = recommendedVersion,
+                                targetVersion = versionChoice.versionName,
+                                sourceApkPath = versionChoice.localPath,
                                 selectedPatchIds = selectedPatches.toList()
                             )
+                            // Persist user's selected patches
+                            com.orion.store.ui.Store.settings.update { s ->
+                                s.copy(savedPatchSelections = s.savedPatchSelections + (app.packageName to selectedPatches.toList()))
+                            }
                             JobStore.enqueue(params)
                             vm.haptic(H.SUCCESS)
                             onDismiss()
@@ -416,6 +510,18 @@ fun MorpheInstallSheet(
                 }
             }
         }
+    }
+
+    if (showVersionSelector) {
+        VersionSelectorSheet(
+            vm = vm,
+            app = app,
+            currentChoice = versionChoice,
+            onVersionSelected = { choice ->
+                versionChoice = choice
+            },
+            onDismiss = { showVersionSelector = false }
+        )
     }
 }
 

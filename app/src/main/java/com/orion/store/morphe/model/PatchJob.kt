@@ -61,10 +61,22 @@ data class PatchJob(
 ) {
     fun withStage(nextStage: JobStage, message: String = "", progress: Int = this.progress): PatchJob {
         JobStateMachine.assertLegalTransition(this.stage, nextStage)
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+        val logEntry = "[$timestamp] [${nextStage.name}] ${message.ifEmpty { nextStage.name }}"
         return copy(
             stage = nextStage,
             stageMessage = message.ifEmpty { nextStage.name.lowercase().replaceFirstChar { it.uppercase() } },
             progress = progress,
+            logs = (logs + logEntry).takeLast(250),
+            updatedAt = System.currentTimeMillis()
+        )
+    }
+
+    fun withLog(logLine: String): PatchJob {
+        val timestamp = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date())
+        val logEntry = "[$timestamp] $logLine"
+        return copy(
+            logs = (logs + logEntry).takeLast(250),
             updatedAt = System.currentTimeMillis()
         )
     }

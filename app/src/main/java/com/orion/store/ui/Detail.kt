@@ -99,6 +99,8 @@ fun DetailScreen(vm: MainViewModel, base: AppItem) {
     val external = !tracked && !directHost && (path.startsWith("http://") || path.startsWith("https://")) && !packaged && "github.com" !in path
     val domain = if (external) runCatching { app.downloadUrl.toUri().host!!.replace("www.", "") }.getOrDefault("Source") else "External Source"
     val fav = app.id in d.favorites
+    val targetPkg = app.packageName ?: app.id
+    val morpheApp = remember(targetPkg) { com.orion.store.morphe.store.MorpheCatalogRepository.getApp(targetPkg) }
 
     var target by remember(app.id) { mutableStateOf<VersionOption?>(null) }
     var versions by remember { mutableStateOf(false) }; var variants by remember { mutableStateOf(false) }
@@ -184,6 +186,13 @@ fun DetailScreen(vm: MainViewModel, base: AppItem) {
                                 DropdownMenuItem({ Text("Report an issue") }, { more = false; vm.haptic(H.LIGHT); report() }, leadingIcon = { Icon(Sym.Flag, null) })
                             }
                             if (installed && android) DropdownMenuItem({ Text("Uninstall") }, { more = false; vm.uninstall(app) }, leadingIcon = { Icon(Sym.Delete, null) })
+                            if (morpheApp != null || s.morpheEnabled) {
+                                DropdownMenuItem({ Text("Patch with Morphe") }, {
+                                    more = false
+                                    val mApp = morpheApp ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = targetPkg, name = app.name)
+                                    vm.openMorpheInstall(mApp)
+                                }, leadingIcon = { Icon(Sym.Build, null) })
+                            }
                             if (installed) {
                                 val managed = isManaged(app.id, s)
                                 DropdownMenuItem({ Text(if (managed) "Don't manage with Orion" else "Manage with Orion") }, {
@@ -235,10 +244,22 @@ fun DetailScreen(vm: MainViewModel, base: AppItem) {
                         }
                         cleanup != null && android -> {
                             Main(Sym.OpenInNew, "Open", onClick = ::launch)
+                            if (morpheApp != null || s.morpheEnabled) {
+                                Side(Sym.Build, "Patch with Morphe") {
+                                    val mApp = morpheApp ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = targetPkg, name = app.name)
+                                    vm.openMorpheInstall(mApp)
+                                }
+                            }
                             Side(Sym.SaveAlt, "Export APK to Downloads") { vm.exportApk(app, cleanup) }
                         }
                         upToDate && android -> {
                             Side(Sym.Delete, "Uninstall") { vm.uninstall(app) }
+                            if (morpheApp != null || s.morpheEnabled) {
+                                Side(Sym.Build, "Patch with Morphe") {
+                                    val mApp = morpheApp ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = targetPkg, name = app.name)
+                                    vm.openMorpheInstall(mApp)
+                                }
+                            }
                             Main(Sym.OpenInNew, "Open", onClick = ::launch)
                         }
                         else -> {
@@ -251,6 +272,12 @@ fun DetailScreen(vm: MainViewModel, base: AppItem) {
                                 else -> Sym.Download to "Download"
                             }
                             Main(icon, if (installing) "Installing..." else label, enabled = !installing && !fallback && !unavailable, busy = installing) { action() }
+                            if (morpheApp != null || s.morpheEnabled) {
+                                Side(Sym.Build, "Patch with Morphe") {
+                                    val mApp = morpheApp ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = targetPkg, name = app.name)
+                                    vm.openMorpheInstall(mApp)
+                                }
+                            }
                             if (needsUpdate && !installing && !fallback && !unavailable && isUpdateIgnored(app, s, System.currentTimeMillis()))
                                 Side(Sym.Notifications, "Stop ignoring this update") { vm.set { it.copy(ignoredUpdates = it.ignoredUpdates - app.id) }; vm.haptic(H.SUCCESS); vm.toast("Updates for ${app.name} will show again") }
                             else if (needsUpdate && !installing && !fallback && !unavailable) Box {

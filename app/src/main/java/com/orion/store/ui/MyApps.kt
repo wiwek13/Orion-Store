@@ -30,6 +30,7 @@ import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.orion.store.data.*
 import kotlinx.coroutines.launch
 
@@ -254,6 +255,14 @@ private fun FilterPills(vm: MainViewModel, saved: List<String>, pill: @Composabl
 private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picked: Boolean? = null, onPick: (() -> Unit)? = null) {
     val (icon, c) = tone(r); val cs = MaterialTheme.colorScheme; val compact = LocalS.current.compactMode
     val bg by animateColorAsState(if (picked == true) cs.secondaryContainer else Color.Transparent, label = "pick")
+
+    val pkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName ?: r.app.id
+    val morpheJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsStateWithLifecycle()
+    val activeJob = remember(morpheJobs, pkg) {
+        morpheJobs.firstOrNull { it.params.packageName == pkg && it.stage.isActive }
+    }
+    var showActiveJobLogSheet by remember { mutableStateOf(false) }
+
     // While picking a tap toggles the row (rows that can't be uninstalled do nothing); otherwise a long-press starts picking
     Column(modifier.fillMaxWidth().padding(horizontal = 8.dp).background(bg, RoundedCornerShape(20.dp))
         .springClick(onLongClick = if (picked == null) onPick else null) { if (picked == null) vm.selectApp(r.app, "lib") else onPick?.invoke() }
@@ -304,19 +313,24 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             @Composable fun Primary(label: String, onClick: () -> Unit) =
                 FilledTonalButton(onClick, shapes = ButtonDefaults.shapes(), contentPadding = ButtonDefaults.SmallContentPadding) { Text(label) }
             when {
+                activeJob != null -> FilledTonalButton({ showActiveJobLogSheet = true }, shapes = ButtonDefaults.shapes(), contentPadding = ButtonDefaults.SmallContentPadding) {
+                    Icon(Sym.Build, null, Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Logs")
+                }
                 r.status == "downloading" -> FilledTonalIconButton({ vm.cancelDownload(r.app.id) }, shapes = IconButtonDefaults.shapes()) { Icon(Sym.Close, "Cancel download") }
                 action == "install" -> Primary("Install") { r.savedFile?.let { vm.installFile(r.app, it) } }
                 action == "repatch" -> Primary("Repatch") {
-                    val pkg = r.app.packageName ?: r.app.id
-                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = pkg, name = r.app.name)
+                    val p = r.app.packageName ?: r.app.id
+                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
                     vm.openMorpheInstall(morpheApp)
                 }
                 action == "update" -> Primary("Update") { vm.download(r.app) }
                 action == "download" -> Primary("Download") { vm.download(r.app) }
                 action == "delete" -> IconButton({ vm.deleteLibraryApk(r.app) }) { Icon(Sym.DeleteOutline, "Delete APK") }
                 r.isPatched -> Primary("Repatch") {
-                    val pkg = r.app.packageName ?: r.app.id
-                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = pkg, name = r.app.name)
+                    val p = r.app.packageName ?: r.app.id
+                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
                     vm.openMorpheInstall(morpheApp)
                 }
                 !r.isInstalledNow || !r.app.installsHere() -> Icon(Sym.ChevronRight, "Open details", tint = cs.onSurfaceVariant)
@@ -325,15 +339,37 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                 var menu by remember { mutableStateOf(false) }
                 IconButton({ menu = true; vm.haptic(H.LIGHT) }) { Icon(Sym.MoreVert, "More options for ${r.app.name}") }
                 DropdownMenu(menu, { menu = false }, shape = RoundedCornerShape(20.dp)) {
-                    val pkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName
-                    if (pkg != null) DropdownMenuItem({ Text("Open") }, { menu = false; runCatching { vm.tracker.launch(pkg) }.onFailure { vm.error("Could not launch app. It may be restricted.") } },
+                    val resolvedPkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName
+                    if (resolvedPkg != null) DropdownMenuItem({ Text("Open") }, { menu = false; runCatching { vm.tracker.launch(resolvedPkg) }.onFailure { vm.error("Could not launch app. It may be restricted.") } },
                         leadingIcon = { Icon(Sym.OpenInNew, null) })
                     DropdownMenuItem({ Text("Patch / Repatch") }, {
                         menu = false
-                        val p = pkg ?: r.app.id
+                        val p = resolvedPkg ?: r.app.id
                         val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
                         vm.openMorpheInstall(morpheApp)
                     }, leadingIcon = { Icon(Sym.Build, null) })
+
+                    val isAppAutoPatch = LocalS.current.autoPatchApps[pkg] ?: true
+                    val pinnedVer = LocalS.current.pinnedAppVersions[pkg]
+                    DropdownMenuItem({ Text(if (isAppAutoPatch) "Auto-patch: Enabled" else "Auto-patch: Disabled") }, {
+                        menu = false
+                        com.orion.store.ui.Store.settings.update { s ->
+                            s.copy(autoPatchApps = s.autoPatchApps + (pkg to !isAppAutoPatch))
+                        }
+                    }, leadingIcon = { Icon(if (isAppAutoPatch) Sym.CheckCircle else Sym.Close, null) })
+
+                    DropdownMenuItem({ Text(if (pinnedVer != null) "Pinned: v$pinnedVer (Tap to unpin)" else "Pin Current Version") }, {
+                        menu = false
+                        com.orion.store.ui.Store.settings.update { s ->
+                            if (pinnedVer != null) {
+                                s.copy(pinnedAppVersions = s.pinnedAppVersions - pkg)
+                            } else {
+                                val verToPin = r.app.version.takeIf { it.isNotBlank() } ?: "Recommended"
+                                s.copy(pinnedAppVersions = s.pinnedAppVersions + (pkg to verToPin))
+                            }
+                        }
+                    }, leadingIcon = { Icon(Sym.Lock, null) })
+
                     DropdownMenuItem({ Text("Uninstall") }, { menu = false; vm.uninstall(r.app) }, leadingIcon = { Icon(Sym.Delete, null) })
                 }
             }
@@ -342,6 +378,49 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             val p by animateFloatAsState(r.progress / 100f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "p")
             LinearWavyProgressIndicator({ p }, Modifier.weight(1f)); Spacer(Modifier.width(12.dp))
             Text("${Math.round(r.progress)}%", style = MaterialTheme.typography.labelLarge)
+        }
+        if (activeJob != null) {
+            Column(Modifier.padding(start = if (compact) 52.dp else 68.dp, top = 8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        activeJob.stageMessage,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = cs.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        "${activeJob.progress}%",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = cs.onSurface
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(
+                        onClick = { showActiveJobLogSheet = true },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Icon(Sym.Terminal, null, Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Live Logs", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                val p by animateFloatAsState(activeJob.progress / 100f, MaterialTheme.motionScheme.defaultSpatialSpec(), label = "jobProgress")
+                LinearWavyProgressIndicator({ p }, Modifier.fillMaxWidth())
+            }
+        }
+        if (showActiveJobLogSheet && activeJob != null) {
+            com.orion.store.morphe.ui.sheets.PatchConsoleLogSheet(
+                vm = vm,
+                job = activeJob,
+                onDismiss = { showActiveJobLogSheet = false }
+            )
         }
     }
 }

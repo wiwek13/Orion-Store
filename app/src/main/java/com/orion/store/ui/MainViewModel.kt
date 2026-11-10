@@ -203,7 +203,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         viewModelScope.launch { settings.map { it.rootMode }.distinctUntilChanged().collect { tracker.root = it } }
-        viewModelScope.launch { settings.map { it.autoUpdateEnabled to it.wifiOnly }.distinctUntilChanged().collect { AutoUpdate.schedule(ctx, s) } }
+        viewModelScope.launch {
+            settings.map { Triple(it.autoUpdateEnabled, it.autoPatchGlobal, it.wifiOnly) }.distinctUntilChanged().collect {
+                AutoUpdate.schedule(ctx, s)
+                com.orion.store.morphe.worker.AutoPatchWorker.schedule(ctx, s)
+            }
+        }
         upd { st -> st.persistedDownloads.entries.fold(st.copy(activeDownloads = st.persistedDownloads)) { acc, (id, v) ->
             val f = v.substringAfter('|'); if (Downloads.status(f).status == DlStatus.SUCCESSFUL) acc.completeDownload(id, f, now()) else acc.cancelDownload(id) } }
         viewModelScope.launch { Downloads.state.collect(::onDownloads) }

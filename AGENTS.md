@@ -184,3 +184,67 @@ A complete suite of deep Android development skills located in `.agents/skills/`
 4. **Preserve Existing Comments & Architecture**:
    - Do not remove existing comments, docstrings, or license headers.
    - Ensure backwards compatibility with legacy settings stored in AtomicFile JSON (`data/Stores.kt`).
+
+---
+
+## 6. Orion Store Fork — Agent Instructions & Bug-Free Patching Specification
+
+> Complete specification mirrored in [INSTRUCTIONS.md](file:///Users/wi15d0m/Documents/Projects/orion-fork/INSTRUCTIONS.md) and [ORION_STORE_FORK_INSTRUCTIONS.md](file:///Users/wi15d0m/Documents/Projects/orion-fork/ORION_STORE_FORK_INSTRUCTIONS.md).
+
+### 6.1 Strict Anti-Regression Rules for Antigravity CLI Agents
+1. **Respect the 3-Layer Orion Store Architecture**:
+   - `ui/`: Compose UI, M3 Expressive, My Apps progress bars, live log sheets, `MainViewModel`. Never block `Dispatchers.Main`.
+   - `data/`: Catalogs (`apps.json`, `mirror_config.json`, `release_notes.json`), MétaMorphe bundle ingestion, DataStore preferences, per-app patch selection persistence, SemVer comparison.
+   - `platform/`: Package tracking, Orion download service + MorpheFlow fallback, isolated Morphe Patcher worker process, deterministic keystore signing, silent installer (Shizuku/Root/Dhizuku/Wireless ADB), cache cleanup.
+2. **Reuse Existing Skills & Tested Modules**:
+   - Port provider cascade & 4-way patch studio filter (`All`, `App-Specific`, `Universal`, `Selected`) from `wiwek13/morpheflow-portal`.
+   - Port 3-stage patching lifecycle (`Preparing` → `Patching` → `Saving`) from `MorpheApp/morphe-manager`.
+3. **Single Source of Truth & Idempotent State**:
+   - Key all app state maps by canonical `packageName`.
+   - Never append raw list items from multiple catalogs or local scans without merging by `packageName`.
+4. **Verify Before Completing Any Step**:
+   - Run `./gradlew :app:compileDebugKotlin` and `./gradlew :app:lintDebug` after every file change. Test via `adb logcat`.
+
+### 6.2 Bug-Free Ingestion from https://metamorphe.vercel.app/#sources
+- Never scrape raw HTML from the SPA shell. Fetch structured JSON catalogs:
+  - Active Bundles: `https://metamorphe.vercel.app/bundles.json` (fallback: `https://raw.githubusercontent.com/nvbangg/awesome-morphe/main/web/public/bundles.json`)
+  - Changelog & Scan: `https://metamorphe.vercel.app/whats-new.json` (fallback: `https://raw.githubusercontent.com/nvbangg/awesome-morphe/main/web/public/whats-new.json`)
+  - Source Repos: `https://raw.githubusercontent.com/nvbangg/awesome-morphe/main/data/repos.json` / `official-bundles.json`
+- Apply ETag / branch commit hash caching, deduplicate branches (at most 1 bundle entry per channel per repo), prioritize official bundles, and fallback to `.mpp` manifest inspection (`PatchLoader`) when `patches-list.json` is missing.
+
+### 6.3 Fixing Duplicates & Auto-Cleaning Local Files Across All Apps
+- **Canonical Merging**: Aggregate compatible patch bundles and APK versions into a single `UnifiedAppModel` keyed by `packageName`. Deduplicate patches by `(bundleRepoUrl, patchName)` and warn on conflicting patches across bundles.
+- **Auto-Clean (`PatchStorageCleaner.kt`)**:
+  - Isolate patching inside `context.cacheDir.resolve("patcher_session/<packageName>/<sessionId>/")`.
+  - In a `finally` block post-install/failure: purge base APKs, `splits_temp/`, `merged_input.apk`, `app_ephemeral/patcher/patched/resources/`, and `*.idsig`.
+  - Delete `*_patched.apk` post-install unless "Keep patched APKs" is enabled (retaining only the single latest build).
+  - On startup & periodic sweep: purge `patcher_session/` folders older than 1 hour; guard with 1 GB minimum free storage check.
+
+### 6.4 Download Pipeline: Orion Store Primary → MorpheFlow Fallback
+- **Tier 1 (Primary)**: Query Orion-Data (`apps.json`, `mirror_config.json`) and release resolvers (GitHub, GitLab, Codeberg, mirrors) with SHA-256 verification.
+- **Tier 2 (MorpheFlow Fallback)**: If missing, 404, or recommended version not hosted, cascade through:
+  1. Google Play (`goopdl` / GPlay API)
+  2. Uptodown Resolver
+  3. APKCombo Resolver
+  4. APKPure Resolver
+  5. Local APK Picker
+- Normalize split bundles (`.xapk`, `.apkm`, `.apks`) by merging device-matching ABI, locale, and DPI splits before patching.
+
+### 6.5 Fixing Instagram Patching & End-to-End Flow
+- **Root Cause Fixes**:
+  - `lateinit property resourceMappings`: Always enable ARSCLib resource decoding when resource-dependent patches or dependencies are selected.
+  - Fingerprint mismatch: Auto-select bundle's `compatiblePackages` Recommended APK Version by default.
+  - Split APK input: Always merge splits prior to feeding Patcher.
+  - Heap OOM: Run Patcher in dedicated `:patcher` process with `android:largeHeap="true"` (1 GB–3 GB heap).
+- **Interactive Flow**: Select App & Version (Recommended default / Specific / Latest / Local) → Select Patches (4-way pills, dependency resolution, DataStore persistence) → Execute Patching (3 stages, live logs & RAM gauge in My Apps, deterministic keystore signing).
+
+### 6.6 Auto Background Patching, Version Pinning & User Controls
+- Trigger WorkManager job when upstream patch bundle updates or recommended app version updates.
+- Support global auto-patch & auto-install toggles, per-app auto-patch toggles, and "Pin selected APK version" locking.
+
+### 6.7 Mandatory Verification Protocol Before Completion
+1. MétaMorphe double-sync: 590+ bundles, 0 duplicate cards, 0 UI freeze.
+2. Instagram patching: Recommended version auto-selected, clean download cascade, resourceMappings initialized, live logs stream, signed APK installs, temp files cleaned.
+3. Older version install → Background auto-patch upgrade: Deterministic keystore in-place update, notification & progress stream, cache purged.
+4. Disable auto-patch & version pinning: Background worker skips disabled apps, respects pinned version.
+

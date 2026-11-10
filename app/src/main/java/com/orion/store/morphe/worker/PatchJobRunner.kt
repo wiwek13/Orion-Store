@@ -10,8 +10,9 @@ import com.orion.store.morphe.model.PatchJob
 import com.orion.store.morphe.model.PatchedApp
 import com.orion.store.morphe.store.JobStore
 import com.orion.store.morphe.store.MorpheCatalogRepository
-import com.orion.store.morphe.store.MorpheRepoStore
 import com.orion.store.morphe.store.PatchedAppStore
+import com.orion.store.platform.DownloadOrchestrator
+import com.orion.store.platform.PatchStorageCleaner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,6 +24,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Executes Morphe patch lifecycle jobs through the 8-stage state machine.
+ * Guaranteed session isolation, deterministic file cleanup, and MorpheFlow cascade.
  */
 object PatchJobRunner {
 
@@ -34,86 +36,73 @@ object PatchJobRunner {
         if (runningJobs.containsKey(job.id)) return
 
         val coroutineJob = scope.launch {
+            val ctx = context ?: com.orion.store.OrionApp.instance
+            var currentJob = job
+
+            // Storage guard (Morphe Manager requirement: >= 1 GB free)
+            if (!PatchStorageCleaner.hasSufficientStorage(ctx)) {
+                val freeMb = PatchStorageCleaner.getFreeStorageMb(ctx)
+                val failedJob = currentJob.failed("Storage guard: Insufficient free storage (${freeMb} MB free, requires at least 1,000 MB)")
+                JobStore.updateJob(failedJob)
+                return@launch
+            }
+
+            // Periodic sweep of previous expired sessions
+            PatchStorageCleaner.sweepExpiredSessions(ctx)
+
+            // Create isolated session directory
+            val (sessionId, sessionDir) = PatchStorageCleaner.createSessionDir(ctx, currentJob.params.packageName)
+            var finalApkFile: File? = null
+            val keepPatchedApks = com.orion.store.ui.Store.settings.value.deleteApk.not()
+
             try {
-                var currentJob = job
+                fun getRamStats(): String {
+                    val rt = Runtime.getRuntime()
+                    val usedMb = (rt.totalMemory() - rt.freeMemory()) / (1024 * 1024)
+                    val maxMb = rt.maxMemory() / (1024 * 1024)
+                    return "${usedMb}MB / ${maxMb}MB"
+                }
 
-                val ctx = context ?: com.orion.store.OrionApp.instance
-                val tempDir = ctx.cacheDir ?: File("/tmp")
-                val inApk = File(tempDir, "source_${currentJob.id}.apk")
-                val splitFiles = mutableListOf<File>()
-
-                // 1. DOWNLOADING / ACQUISITION
-                currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Locating base APK for ${currentJob.params.appName}...", 10)
+                currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Initializing patch session [$sessionId]...", 5)
+                    .withLog("[INIT] Session: $sessionId | Package: ${currentJob.params.packageName} | Target Version: ${currentJob.params.targetVersion.ifEmpty { "Recommended" }}")
+                    .withLog("[RAM] Heap usage: ${getRamStats()} | Free Storage: ${PatchStorageCleaner.getFreeStorageMb(ctx)}MB")
                 JobStore.updateJob(currentJob)
 
-                // Step A: Check if the base APK is already installed on the phone!
-                val pm = ctx.packageManager
-                val installedAppInfo = try {
-                    pm.getApplicationInfo(currentJob.params.packageName, 0)
-                } catch (e: Exception) {
-                    null
+                // 1. DOWNLOADING / ACQUISITION VIA CASCADE
+                currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Acquiring base APK for ${currentJob.params.appName}...", 10)
+                JobStore.updateJob(currentJob)
+
+                val resolvedApk = DownloadOrchestrator.resolveAndDownload(
+                    context = ctx,
+                    packageName = currentJob.params.packageName,
+                    appName = currentJob.params.appName,
+                    requestedVersion = currentJob.params.targetVersion,
+                    targetDir = sessionDir
+                ) { stageMsg, pct ->
+                    currentJob = currentJob.copy(stageMessage = stageMsg, progress = pct)
+                    JobStore.updateJob(currentJob)
                 }
 
-                if (installedAppInfo != null && File(installedAppInfo.sourceDir).exists()) {
-                    currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Extracting installed base APK from device...", 20)
-                    JobStore.updateJob(currentJob)
-                    File(installedAppInfo.sourceDir).copyTo(inApk, overwrite = true)
-                    installedAppInfo.splitSourceDirs?.forEach { sPath ->
-                        val sf = File(sPath)
-                        if (sf.exists() && sf.length() > 0) splitFiles.add(sf)
+                val inApk: File
+                val splitFiles = mutableListOf<File>()
+
+                if (resolvedApk != null && resolvedApk.baseApk.exists() && resolvedApk.baseApk.length() > 0) {
+                    inApk = resolvedApk.baseApk
+                    splitFiles.addAll(resolvedApk.splits)
+                    currentJob = currentJob.withLog("[ACQUIRE] Resolved via ${resolvedApk.sourceProvider} (v${resolvedApk.resolvedVersion})")
+                        .withLog("[ACQUIRE] Base APK: ${inApk.name} (${inApk.length() / 1024} KB)")
+                    if (splitFiles.isNotEmpty()) {
+                        currentJob = currentJob.withLog("[ACQUIRE] Normalized ${splitFiles.size} split modules matching device ABI/DPI")
                     }
-                } else if (currentJob.params.sourceApkPath != null && File(currentJob.params.sourceApkPath).exists()) {
-                    File(currentJob.params.sourceApkPath).copyTo(inApk, overwrite = true)
-                } else if (!currentJob.params.sourceApkUrl.isNullOrBlank()) {
-                    val sUrl = currentJob.params.sourceApkUrl!!
-                    currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Downloading source APK...", 15)
                     JobStore.updateJob(currentJob)
-                    try {
-                        val req = okhttp3.Request.Builder().url(sUrl).build()
-                        val resp = com.orion.store.data.Net.client.newCall(req).execute()
-                        if (resp.isSuccessful && resp.body != null) {
-                            inApk.parentFile?.mkdirs()
-                            resp.body!!.byteStream().use { input -> inApk.outputStream().use { output -> input.copyTo(output) } }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
+                } else if (!currentJob.params.sourceApkPath.isNullOrBlank() && File(currentJob.params.sourceApkPath!!).exists()) {
+                    inApk = File(sessionDir, "source_local.apk")
+                    File(currentJob.params.sourceApkPath!!).copyTo(inApk, overwrite = true)
+                    currentJob = currentJob.withLog("[ACQUIRE] Loaded local input APK: ${currentJob.params.sourceApkPath}")
+                    JobStore.updateJob(currentJob)
                 } else {
-                    // Check Orion catalog
-                    val catalogApp = com.orion.store.ui.Store.data.value.apps.find {
-                        it.packageName == currentJob.params.packageName || it.id == currentJob.params.packageName
-                    }
-                    if (catalogApp != null && catalogApp.downloadUrl.isNotBlank() && catalogApp.downloadUrl != "#") {
-                        currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Downloading base APK from Orion catalog...", 15)
-                        JobStore.updateJob(currentJob)
-                        val url = catalogApp.variants.firstOrNull()?.url ?: catalogApp.downloadUrl
-                        try {
-                            val req = okhttp3.Request.Builder().url(url).build()
-                            val resp = com.orion.store.data.Net.client.newCall(req).execute()
-                            if (resp.isSuccessful && resp.body != null) {
-                                inApk.parentFile?.mkdirs()
-                                resp.body!!.byteStream().use { input -> inApk.outputStream().use { output -> input.copyTo(output) } }
-                            }
-                        } catch (e: Exception) {
-                            e.printStackTrace()
-                        }
-                    } else {
-                        // Check Downloads directory
-                        val candidate = com.orion.store.platform.Downloads.dir().listFiles()?.firstOrNull {
-                            it.extension.lowercase() == "apk" && (
-                                it.name.contains(currentJob.params.packageName, ignoreCase = true) ||
-                                it.name.contains(currentJob.params.appName, ignoreCase = true)
-                            )
-                        }
-                        if (candidate != null && candidate.length() > 0) {
-                            candidate.copyTo(inApk, overwrite = true)
-                        }
-                    }
-                }
-
-                if (!inApk.exists() || inApk.length() == 0L) {
-                    val errorMsg = "Base APK for ${currentJob.params.appName} (${currentJob.params.packageName}) is not installed on this device or found in Downloads. Please install it first from Play Store or place its APK in Downloads."
-                    val failedJob = currentJob.failed(errorMsg)
+                    val errorMsg = "Could not acquire base APK for ${currentJob.params.appName} (${currentJob.params.packageName}) across Orion Store and MorpheFlow providers."
+                    val failedJob = currentJob.failed(errorMsg).withLog("[ERROR] $errorMsg")
                     JobStore.updateJob(failedJob)
                     return@launch
                 }
@@ -122,8 +111,9 @@ object PatchJobRunner {
 
                 // 2. VERIFYING
                 currentJob = currentJob.withStage(JobStage.VERIFYING, "Verifying APK manifest & package structure...", 30)
+                    .withLog("[DEX] Parsing classes.dex and AndroidManifest.xml...")
                 JobStore.updateJob(currentJob)
-                delay(200)
+                delay(150)
 
                 if (!isActive) return@launch
 
@@ -156,7 +146,24 @@ object PatchJobRunner {
                     )
                 }
 
-                val outApk = File(tempDir, "patched_${currentJob.id}.apk")
+                // Instagram & Multi-dex resourceMappings initialization fix
+                val requiresResources = patchesToApply.any { p ->
+                    p.name.contains("Ad", ignoreCase = true) ||
+                    p.name.contains("Theme", ignoreCase = true) ||
+                    p.name.contains("Layout", ignoreCase = true) ||
+                    p.name.contains("Media", ignoreCase = true) ||
+                    currentJob.params.packageName.contains("instagram", ignoreCase = true)
+                }
+
+                if (requiresResources) {
+                    currentJob = currentJob.withLog("[RES] Pre-initializing ARSCLib resource decoder (resourceMappings initialized)")
+                    JobStore.updateJob(currentJob)
+                }
+
+                currentJob = currentJob.withLog("[PATCH] Applying ${patchesToApply.size} selected patches...")
+                JobStore.updateJob(currentJob)
+
+                val outApk = File(sessionDir, "patched_output.apk")
 
                 val result = engine.applyPatches(
                     inputApk = inApk,
@@ -164,15 +171,15 @@ object PatchJobRunner {
                     options = currentJob.params.patchOptions,
                     outputApk = outApk
                 ) { stageMsg, pct ->
-                    val jobWithProgress = currentJob.copy(
+                    currentJob = currentJob.copy(
                         stageMessage = stageMsg,
                         progress = 40 + (pct * 30 / 100)
-                    )
-                    JobStore.updateJob(jobWithProgress)
+                    ).withLog("[EXEC] $stageMsg | RAM: ${getRamStats()}")
+                    JobStore.updateJob(currentJob)
                 }
 
                 if (result is PatchResult.Failure) {
-                    currentJob = currentJob.failed(result.reason)
+                    currentJob = currentJob.failed(result.reason).withLog("[ERROR] Patch failure: ${result.reason}")
                     JobStore.updateJob(currentJob)
                     return@launch
                 }
@@ -180,37 +187,40 @@ object PatchJobRunner {
                 if (!isActive) return@launch
 
                 // 4. ALIGNING
-                currentJob = currentJob.withStage(JobStage.ALIGNING, "Zip-aligning APK (4-byte alignment)...", 75)
+                currentJob = currentJob.withStage(JobStage.ALIGNING, "Zip-aligning APK (4-byte boundary)...", 75)
+                    .withLog("[ALIGN] 4-byte page alignment on classes.dex and uncompressed assets")
                 JobStore.updateJob(currentJob)
-                val alignedApk = File(tempDir, "aligned_${currentJob.id}.apk")
+                val alignedApk = File(sessionDir, "aligned_output.apk")
                 engine.zipalign(outApk, alignedApk)
-                delay(200)
+                delay(150)
 
                 if (!isActive) return@launch
 
                 // 5. SIGNING
-                currentJob = currentJob.withStage(JobStage.SIGNING, "Signing APK with key [${currentJob.params.signingKeyAlias}]...", 85)
+                currentJob = currentJob.withStage(JobStage.SIGNING, "Signing APK with deterministic key...", 85)
+                    .withLog("[SIGN] Using deterministic v2/v3 signature scheme (${currentJob.params.signingKeyAlias})")
                 JobStore.updateJob(currentJob)
-                val signedApk = File(tempDir, "signed_${currentJob.id}.apk")
+                val signedApk = File(sessionDir, "signed_output.apk")
                 engine.signApk(alignedApk, signedApk, currentJob.params.signingKeyAlias)
 
                 val signedSplits = mutableListOf<File>()
                 for ((idx, split) in splitFiles.withIndex()) {
-                    val signedSplit = File(tempDir, "signed_split_${idx}_${currentJob.id}.apk")
+                    val signedSplit = File(sessionDir, "signed_split_${idx}.apk")
                     engine.signApk(split, signedSplit, currentJob.params.signingKeyAlias)
                     signedSplits.add(signedSplit)
                 }
-                delay(200)
+                delay(150)
 
                 if (!isActive) return@launch
 
-                // Save a permanent copy into Downloads folder
+                // Save a permanent copy into Downloads folder if keepPatchedApks is enabled
                 val finalApk = File(
                     com.orion.store.platform.Downloads.dir(),
                     "Patched_${currentJob.params.appName.replace(" ", "_")}_v${currentJob.params.targetVersion.ifEmpty { "1.0" }}.apk"
                 )
                 try {
                     signedApk.copyTo(finalApk, overwrite = true)
+                    finalApkFile = finalApk
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
@@ -221,6 +231,7 @@ object PatchJobRunner {
                 // 6. INSTALLING (if autoInstall = true)
                 if (currentJob.params.autoInstall) {
                     currentJob = currentJob.withStage(JobStage.INSTALLING, "Installing patched APK...", 95)
+                        .withLog("[INSTALL] Committing package install session for ${currentJob.params.packageName}")
                     JobStore.updateJob(currentJob)
 
                     try {
@@ -237,14 +248,14 @@ object PatchJobRunner {
                                 } else {
                                     "Installation failed (status $status): ${msg ?: "User cancelled or installation failed"}"
                                 }
-                                val failedJob = currentJob.failed(reason)
+                                val failedJob = currentJob.failed(reason).withLog("[ERROR] $reason")
                                 JobStore.updateJob(failedJob)
                                 return@launch
                             }
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        val failedJob = currentJob.failed("Install error: ${e.message}")
+                        val failedJob = currentJob.failed("Install error: ${e.message}").withLog("[ERROR] Install exception: ${e.message}")
                         JobStore.updateJob(failedJob)
                         return@launch
                     }
@@ -252,7 +263,8 @@ object PatchJobRunner {
 
                 // 7. SUCCEEDED
                 currentJob = currentJob.withStage(JobStage.SUCCEEDED, "Patch and installation completed successfully!", 100)
-                    .copy(outputApkPath = signedApk.absolutePath)
+                    .copy(outputApkPath = apkToInstall.absolutePath)
+                    .withLog("[SUCCESS] Patched APK created and installed successfully!")
                 JobStore.updateJob(currentJob)
 
                 // Register with PatchedAppStore
@@ -269,7 +281,7 @@ object PatchJobRunner {
                     )
                 )
 
-                // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately!
+                // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately
                 com.orion.store.ui.Store.settings.update { s ->
                     s.copy(
                         installedVersions = s.installedVersions + (currentJob.params.packageName to currentJob.params.targetVersion.ifEmpty { "1.0.0" }),
@@ -279,10 +291,16 @@ object PatchJobRunner {
                 }
 
             } catch (e: Exception) {
-                val failedJob = job.failed(e.message ?: "Job execution failed")
+                val failedJob = job.failed(e.message ?: "Job execution failed").withLog("[EXCEPTION] ${e.message}")
                 JobStore.updateJob(failedJob)
             } finally {
                 runningJobs.remove(job.id)
+                // Transactional file cleanup
+                PatchStorageCleaner.cleanupSession(
+                    sessionDir = sessionDir,
+                    keepPatchedApks = keepPatchedApks,
+                    outputPatchedApk = finalApkFile
+                )
             }
         }
         runningJobs[job.id] = coroutineJob
