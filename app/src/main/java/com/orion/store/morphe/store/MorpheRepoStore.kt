@@ -195,6 +195,7 @@ object MorpheRepoStore {
             id = UUID.randomUUID().toString(),
             name = name,
             url = url,
+            description = "Custom user added patch repository",
             isEnabled = true,
             isDefault = false,
             isTrusted = false
@@ -202,8 +203,50 @@ object MorpheRepoStore {
         _repos.update { it + repo }
     }
 
+    fun updateRepo(id: String, name: String, url: String) {
+        _repos.update { list ->
+            list.map {
+                if (it.id == id) it.copy(name = name, url = url) else it
+            }
+        }
+    }
+
     fun removeRepo(id: String) {
-        _repos.update { list -> list.filterNot { it.id == id && !it.isDefault } }
+        val target = _repos.value.firstOrNull { it.id == id }
+        if (target != null) {
+            // Persist removal so background scraping never restores it
+            com.orion.store.ui.Store.settings.update { s ->
+                s.copy(morpheRemovedRepoUrls = s.morpheRemovedRepoUrls + target.url + target.name)
+            }
+        }
+        _repos.update { list -> list.filterNot { it.id == id } }
+    }
+
+    fun resetToDefaults() {
+        com.orion.store.ui.Store.settings.update { s ->
+            s.copy(morpheRemovedRepoUrls = emptySet())
+        }
+        // Restore default and community repo
+        val defaultRepo = MorpheRepo(
+            id = "repo-official-morphe",
+            name = "Official Morphe Ecosystem",
+            url = "https://api.morphe.app/v1/patches.json",
+            description = "Verified and cryptographically signed patches for popular media and messaging apps.",
+            isEnabled = true,
+            isDefault = true,
+            isTrusted = true,
+            lastSyncTime = System.currentTimeMillis() - 3600_000
+        )
+        val communityRepo = MorpheRepo(
+            id = "repo-community-tools",
+            name = "Community Open Patches",
+            url = "https://raw.githubusercontent.com/morphe-community/repo/main/index.json",
+            description = "Community submitted patches for utility and open-source applications.",
+            isEnabled = true,
+            isDefault = false,
+            isTrusted = false
+        )
+        _repos.value = listOf(defaultRepo, communityRepo)
     }
 
     fun toggleRepo(id: String, enabled: Boolean) {

@@ -4,6 +4,8 @@ import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,8 +31,14 @@ fun MorpheSettingsPage(
     onNavigateToNavCustomize: () -> Unit
 ) {
     val cs = MaterialTheme.colorScheme
-    var confirmClearCache by remember { mutableStateOf(false) }
+    val repos by com.orion.store.morphe.store.MorpheRepoStore.repos.collectAsState()
+    var showManageRepos by remember { mutableStateOf(false) }
+    var repoToEdit by remember { mutableStateOf<com.orion.store.morphe.model.MorpheRepo?>(null) }
+    var showAddRepoDialog by remember { mutableStateOf(false) }
+    var newRepoName by remember { mutableStateOf("") }
+    var newRepoUrl by remember { mutableStateOf("") }
     var confirmResetRepos by remember { mutableStateOf(false) }
+    var confirmClearCache by remember { mutableStateOf(false) }
     var keyInfo by remember { mutableStateOf(com.orion.store.morphe.store.KeyStoreManager.getActiveKeyInfo()) }
     var showExportCert by remember { mutableStateOf(false) }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
@@ -110,7 +118,10 @@ fun MorpheSettingsPage(
             // Repositories Section
             Text("Community Repositories", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
             Surface(
-                Modifier.fillMaxWidth(),
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .clickable { showManageRepos = true },
                 shape = RoundedCornerShape(20.dp),
                 color = cs.surfaceContainerHigh
             ) {
@@ -119,19 +130,36 @@ fun MorpheSettingsPage(
                         Icon(Sym.Extension, null, tint = cs.primary)
                         Spacer(Modifier.width(10.dp))
                         Column(Modifier.weight(1f)) {
-                            Text("MorpheApp/morphe-patches", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                            Text("Default repository · 42 compatible target apps", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                            Text("${repos.size} Repositories Configured", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                            Text(
+                                "${repos.count { it.isEnabled }} active · Tap to view, add, edit, or remove",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
                         }
+                        Icon(Sym.KeyboardArrowRight, "Open", tint = cs.onSurfaceVariant)
                     }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { confirmResetRepos = true }, shapes = ButtonDefaults.shapes()) {
-                            Text("Reset to Default")
+                        FilledTonalButton(
+                            onClick = { showManageRepos = true },
+                            shapes = ButtonDefaults.shapes()
+                        ) {
+                            Icon(Sym.Tune, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Manage Repositories")
                         }
-                        FilledTonalButton(onClick = { /* Add repo modal */ }, shapes = ButtonDefaults.shapes()) {
+                        FilledTonalButton(
+                            onClick = {
+                                newRepoName = ""
+                                newRepoUrl = ""
+                                showAddRepoDialog = true
+                            },
+                            shapes = ButtonDefaults.shapes()
+                        ) {
                             Icon(Sym.Add, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Add Repository")
+                            Text("Add Repo")
                         }
                     }
                 }
@@ -271,6 +299,211 @@ fun MorpheSettingsPage(
             },
             dismissButton = {
                 TextButton(onClick = { showExportCert = false }) { Text("Close") }
+            }
+        )
+    }
+
+    // Community Repositories Management Dialog
+    if (showManageRepos) {
+        AlertDialog(
+            onDismissRequest = { showManageRepos = false },
+            title = {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Community Repositories", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    IconButton(
+                        onClick = {
+                            newRepoName = ""
+                            newRepoUrl = ""
+                            showAddRepoDialog = true
+                        }
+                    ) {
+                        Icon(Sym.Add, "Add Repository", tint = cs.primary)
+                    }
+                }
+            },
+            text = {
+                Column(Modifier.fillMaxWidth()) {
+                    Text(
+                        "Manage patch repositories. Removed repositories will never be automatically re-added.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LazyColumn(
+                        Modifier.fillMaxWidth().heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(repos, key = { it.id }) { repo ->
+                            Surface(
+                                Modifier.fillMaxWidth(),
+                                shape = RoundedCornerShape(14.dp),
+                                color = cs.surfaceContainerHighest
+                            ) {
+                                Row(
+                                    Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                repo.name,
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                            )
+                                            if (repo.isDefault) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Badge(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer) {
+                                                    Text("Official")
+                                                }
+                                            }
+                                        }
+                                        Text(
+                                            repo.url,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = cs.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    IconButton(
+                                        onClick = { repoToEdit = repo },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(Sym.Edit, "Edit", Modifier.size(16.dp), tint = cs.onSurfaceVariant)
+                                    }
+
+                                    IconButton(
+                                        onClick = {
+                                            com.orion.store.morphe.store.MorpheRepoStore.removeRepo(repo.id)
+                                            vm.haptic(H.MEDIUM)
+                                        },
+                                        modifier = Modifier.size(32.dp)
+                                    ) {
+                                        Icon(Sym.Delete, "Remove", Modifier.size(16.dp), tint = cs.error)
+                                    }
+
+                                    Switch(
+                                        checked = repo.isEnabled,
+                                        onCheckedChange = { enabled ->
+                                            com.orion.store.morphe.store.MorpheRepoStore.toggleRepo(repo.id, enabled)
+                                            vm.haptic(H.SELECTION)
+                                        },
+                                        modifier = Modifier.padding(start = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showManageRepos = false }) { Text("Done") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    com.orion.store.morphe.store.MorpheRepoStore.resetToDefaults()
+                    vm.haptic(H.SUCCESS)
+                }) {
+                    Text("Reset to Defaults", color = cs.error)
+                }
+            }
+        )
+    }
+
+    // Add Repository Dialog
+    if (showAddRepoDialog) {
+        var addError by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showAddRepoDialog = false },
+            title = { Text("Add Repository") },
+            text = {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Enter repository details to fetch community patches.", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                    OutlinedTextField(
+                        value = newRepoName,
+                        onValueChange = { newRepoName = it },
+                        label = { Text("Repository Name") },
+                        placeholder = { Text("e.g. Crimera Patches") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = newRepoUrl,
+                        onValueChange = { newRepoUrl = it },
+                        label = { Text("Repository JSON URL") },
+                        placeholder = { Text("https://example.com/patches.json") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (addError.isNotEmpty()) {
+                        Text(addError, style = MaterialTheme.typography.labelSmall, color = cs.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (newRepoName.isBlank() || newRepoUrl.isBlank()) {
+                            addError = "Please enter both name and URL"
+                            return@TextButton
+                        }
+                        com.orion.store.morphe.store.MorpheRepoStore.addRepo(newRepoName.trim(), newRepoUrl.trim())
+                        vm.haptic(H.SUCCESS)
+                        showAddRepoDialog = false
+                    }
+                ) { Text("Add") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddRepoDialog = false }) { Text("Cancel") }
+            }
+        )
+    }
+
+    // Edit Repository Dialog
+    repoToEdit?.let { repo ->
+        var editName by remember { mutableStateOf(repo.name) }
+        var editUrl by remember { mutableStateOf(repo.url) }
+        AlertDialog(
+            onDismissRequest = { repoToEdit = null },
+            title = { Text("Edit Repository") },
+            text = {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = editName,
+                        onValueChange = { editName = it },
+                        label = { Text("Repository Name") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = editUrl,
+                        onValueChange = { editUrl = it },
+                        label = { Text("Repository URL") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (editName.isNotBlank() && editUrl.isNotBlank()) {
+                            com.orion.store.morphe.store.MorpheRepoStore.updateRepo(repo.id, editName.trim(), editUrl.trim())
+                            vm.haptic(H.SUCCESS)
+                        }
+                        repoToEdit = null
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { repoToEdit = null }) { Text("Cancel") }
             }
         )
     }

@@ -50,8 +50,15 @@ import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 private val MODERN_SORTS = listOf(SortOption.NEWEST, SortOption.NAME_ASC, SortOption.NAME_DESC, SortOption.SIZE_ASC, SortOption.SIZE_DESC, SortOption.OLDEST)
-private val MORPHE_SORTS = listOf(SortOption.MOST_PATCHES, SortOption.MOST_DOWNLOADS, SortOption.NAME_ASC, SortOption.NAME_DESC, SortOption.NEWEST)
-private val CLASSIC_SORTS = SortOption.entries - SortOption.HOME - SortOption.MOST_PATCHES - SortOption.MOST_DOWNLOADS
+private val MORPHE_SORTS = listOf(
+    SortOption.MOST_PATCHES,
+    SortOption.FEATURED,
+    SortOption.NEWEST,
+    SortOption.UPDATED,
+    SortOption.MOST_DOWNLOADS,
+    SortOption.NAME_ASC
+)
+private val CLASSIC_SORTS = SortOption.entries - SortOption.HOME - SortOption.MOST_PATCHES - SortOption.MOST_DOWNLOADS - SortOption.FEATURED - SortOption.UPDATED
 private val full: LazyGridItemSpanScope.() -> GridItemSpan = { GridItemSpan(maxLineSpan) }
 private val BLOB_SHAPES = listOf(MaterialShapes.Cookie9Sided, MaterialShapes.Sunny, MaterialShapes.Clover4Leaf, MaterialShapes.Cookie6Sided, MaterialShapes.Pentagon, MaterialShapes.Flower, MaterialShapes.Gem)
 private val FAN = listOf(-6f, 5f, 3f, -4f)
@@ -69,27 +76,33 @@ fun StoreTab(vm: MainViewModel, platform: String, contentPadding: PaddingValues)
     val groups = remember(list, sort) { if (sort == SortOption.NAME_ASC || sort == SortOption.NAME_DESC) list.groupBy { initial(it.name) }.toList() else listOf("" to list) }
     val modernHome = vm.modernCollections()
     val grid = rememberLazyGridState(); val scope = rememberCoroutineScope()
+    val isTvTab = vm.tab == com.orion.store.data.Tab.TV
+    val isPcTab = vm.tab == com.orion.store.data.Tab.PC
+    val isMorpheActive = vm.isMorpheStoreActive && !isPcTab
     val morpheApps by com.orion.store.morphe.store.MorpheCatalogRepository.apps.collectAsState()
     val isMorpheSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
-    val filteredMorpheApps = remember(morpheApps, vm.morpheCategory, ts.query, vm.isMorpheStoreActive, vm.sortControl) {
-        if (!vm.isMorpheStoreActive) emptyList()
+    val filteredMorpheApps = remember(morpheApps, vm.morpheCategory, ts.query, isMorpheActive, vm.sortControl, vm.tab) {
+        if (!isMorpheActive) emptyList()
         else {
             val unranked = morpheApps.filter { app ->
+                if (isTvTab && !isMorpheTvApp(app)) return@filter false
                 (vm.morpheCategory == "All" || app.category.equals(vm.morpheCategory, ignoreCase = true)) &&
                 (ts.query.isBlank() || app.name.contains(ts.query, ignoreCase = true) || app.packageName.contains(ts.query, ignoreCase = true) || app.category.contains(ts.query, ignoreCase = true))
             }
             when (vm.sortControl) {
                 SortOption.MOST_PATCHES -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.patchCount }.thenByDescending { it.installs })
+                SortOption.FEATURED -> unranked.sortedWith(compareBy<com.orion.store.morphe.store.MorpheCatalogApp> { it.featuredRank }.thenByDescending { it.patchCount })
+                SortOption.NEWEST -> unranked.sortedByDescending { it.firstSeen }
+                SortOption.UPDATED -> unranked.sortedByDescending { it.updatedAt }
                 SortOption.MOST_DOWNLOADS -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.installs }.thenByDescending { it.patchCount })
                 SortOption.NAME_ASC -> unranked.sortedBy { it.name.lowercase() }
                 SortOption.NAME_DESC -> unranked.sortedByDescending { it.name.lowercase() }
-                SortOption.NEWEST -> unranked.sortedByDescending { it.bundleCount }
                 else -> unranked.sortedWith(compareByDescending<com.orion.store.morphe.store.MorpheCatalogApp> { it.patchCount }.thenByDescending { it.installs })
             }
         }
     }
     // Jump to top only when the filter actually changes, not when returning to a tab whose scroll was restored.
-    val view = "${ts.category}|${ts.sort}|${ts.filterFavorites}|${vm.showAllSorted}|${vm.expandedView}|${vm.isMorpheStoreActive}|${vm.morpheCategory}"
+    val view = "${ts.category}|${ts.sort}|${ts.filterFavorites}|${vm.showAllSorted}|${vm.expandedView}|${isMorpheActive}|${vm.morpheCategory}"
     var lastView by rememberSaveable { mutableStateOf(view) }
     LaunchedEffect(view) { if (view != lastView) { lastView = view; grid.scrollToItem(0) } }
     val ptr = rememberPullToRefreshState(); val wc = LocalWidthClass.current
@@ -98,20 +111,20 @@ fun StoreTab(vm: MainViewModel, platform: String, contentPadding: PaddingValues)
         val gridW = minOf(maxWidth, 1200.dp)
         val cols = if (!wc.wide) 1 else ((gridW - 32.dp + 12.dp) / (320.dp + 12.dp)).toInt().coerceAtLeast(1)
         val onReload: () -> Unit = {
-            if (vm.isMorpheStoreActive) {
+            if (isMorpheActive) {
                 scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
             } else {
                 vm.reload()
             }
         }
-        PullToRefreshBox(if (vm.isMorpheStoreActive) isMorpheSyncing else vm.refreshing, onReload, Modifier.fillMaxSize(), state = ptr,
-            indicator = { PtrIndicator(ptr, if (vm.isMorpheStoreActive) isMorpheSyncing else vm.refreshing, s.pullToRefreshCharacter, Modifier.align(Alignment.TopCenter)) }) {
+        PullToRefreshBox(if (isMorpheActive) isMorpheSyncing else vm.refreshing, onReload, Modifier.fillMaxSize(), state = ptr,
+            indicator = { PtrIndicator(ptr, if (isMorpheActive) isMorpheSyncing else vm.refreshing, s.pullToRefreshCharacter, Modifier.align(Alignment.TopCenter)) }) {
             LazyVerticalGrid(GridCells.Adaptive(if (s.compactMode) 78.dp else 100.dp), Modifier.fillMaxSize().wrapContentWidth().widthIn(max = 1200.dp), grid, contentPadding,
                 horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 item("header", span = full) { Header(vm) }
-                item("filters", span = full) { Filters(vm, ts, cats, if (vm.isMorpheStoreActive) filteredMorpheApps.size else visible.size, platform, modern) }
+                item("filters", span = full) { Filters(vm, ts, cats, if (isMorpheActive) filteredMorpheApps.size else visible.size, platform, modern) }
                 when {
-                    vm.isMorpheStoreActive -> {
+                    isMorpheActive -> {
                         if (isMorpheSyncing && morpheApps.isEmpty()) {
                             item("morphe_loading", span = full) { StoreSkeleton(modern) }
                         } else if (filteredMorpheApps.isEmpty()) {
@@ -181,22 +194,23 @@ private fun MoreButton(label: String, onClick: () -> Unit) = Box(Modifier.fillMa
 @Composable
 private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, count: Int, platform: String, modern: Boolean) {
     val cs = MaterialTheme.colorScheme
-    val filtered = if (vm.isMorpheStoreActive) vm.morpheCategory != "All" || ts.query.isNotEmpty() else ts.category != "All" || ts.query.isNotEmpty()
+    val isMorpheActive = vm.isMorpheStoreActive && vm.tab != com.orion.store.data.Tab.PC
+    val filtered = if (isMorpheActive) vm.morpheCategory != "All" || ts.query.isNotEmpty() else ts.category != "All" || ts.query.isNotEmpty()
     val morpheCats by com.orion.store.morphe.store.MorpheCatalogRepository.categories.collectAsState()
-    val effectiveCats = if (vm.isMorpheStoreActive) morpheCats else cats
+    val effectiveCats = if (isMorpheActive) morpheCats else cats
 
     Column(Modifier.fillMaxWidth().padding(bottom = 4.dp)) {
         LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            item("sort") { SortButton(vm, if (vm.isMorpheStoreActive) MORPHE_SORTS else if (modern) MODERN_SORTS else CLASSIC_SORTS) }
+            item("sort") { SortButton(vm, if (isMorpheActive) MORPHE_SORTS else if (modern) MODERN_SORTS else CLASSIC_SORTS) }
             item("fav") {
                 FilledTonalIconToggleButton(ts.filterFavorites, { vm.toggleFavorites() }, shapes = IconButtonDefaults.toggleableShapes()) {
                     Icon(if (ts.filterFavorites) Sym.Favorite else Sym.FavoriteBorder, "Show Favorites")
                 }
             }
-            if (vm.s.morpheEnabled) {
+            if (vm.s.morpheEnabled && vm.tab != com.orion.store.data.Tab.PC) {
                 item("morphe_store_toggle") {
                     FilledTonalIconToggleButton(
-                        checked = vm.isMorpheStoreActive,
+                        checked = isMorpheActive,
                         onCheckedChange = { vm.toggleMorpheStore() },
                         shapes = IconButtonDefaults.toggleableShapes()
                     ) {
@@ -206,9 +220,9 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
             }
             if (effectiveCats.isNotEmpty()) item("div") { VerticalDivider(Modifier.height(28.dp).padding(horizontal = 4.dp), color = cs.outlineVariant) }
             items(effectiveCats, key = { it }) { c ->
-                val active = if (vm.isMorpheStoreActive) vm.morpheCategory == c else ts.category == c
-                val home = !vm.isMorpheStoreActive && modern && c == "All"
-                val isMorpheAll = vm.isMorpheStoreActive && c == "All"
+                val active = if (isMorpheActive) vm.morpheCategory == c else ts.category == c
+                val home = !isMorpheActive && modern && c == "All"
+                val isMorpheAll = isMorpheActive && c == "All"
                 val label = if (home) "Home" else c
                 val icon = when {
                     home -> if (active) Sym.HomeFilled else Sym.Home
@@ -216,7 +230,7 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
                     else -> null
                 }
                 Choice(active, label, icon) {
-                    if (vm.isMorpheStoreActive) {
+                    if (isMorpheActive) {
                         vm.selectMorpheCategory(c)
                     } else {
                         if (home) vm.restoreBrowse() else vm.filterCategory(c)
@@ -226,7 +240,7 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
         }
         Row(Modifier.padding(start = 20.dp, end = 12.dp, top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                if (vm.isMorpheStoreActive) {
+                if (isMorpheActive) {
                     if (vm.morpheCategory != "All" || ts.query.isNotEmpty()) {
                         Text(
                             if (ts.query.isNotEmpty()) "Search results" else vm.morpheCategory,
@@ -250,12 +264,12 @@ private fun Filters(vm: MainViewModel, ts: TabViewState, cats: List<String>, cou
             }
             // TV remotes cannot pull to refresh, so the button shows on modern too
             val isSyncing by com.orion.store.morphe.store.MorpheCatalogRepository.isSyncing.collectAsState()
-            val refreshing = if (vm.isMorpheStoreActive) isSyncing else vm.refreshing
+            val refreshing = if (isMorpheActive) isSyncing else vm.refreshing
             val scope = rememberCoroutineScope()
             if (!modern || Device.isTv) {
                 IconButton(
                     onClick = {
-                        if (vm.isMorpheStoreActive) {
+                        if (isMorpheActive) {
                             scope.launch { com.orion.store.morphe.store.MorpheCatalogRepository.sync(force = true) }
                         } else {
                             vm.reload()
@@ -856,4 +870,13 @@ fun MorpheAppRow(
             )
         }
     }
+}
+
+private val TV_REGEX = Regex("(\\b(tv|androidtv|firetv|smarttube|leanback|kodi|plex|jellyfin|stremio|tizentube|atv)\\b|\\.tv\\b|\\btv\\.)", RegexOption.IGNORE_CASE)
+private val NON_TV_PACKAGES = listOf("com.google.android.inputmethod", "whatsapp", "signal", "keyboard", "clock", "slowly", "instagram", "facebook", "twitter", "reddit")
+
+private fun isMorpheTvApp(app: com.orion.store.morphe.store.MorpheCatalogApp): Boolean {
+    val q = "${app.name} ${app.packageName} ${app.category} ${app.description}".lowercase()
+    if (NON_TV_PACKAGES.any { app.packageName.contains(it, ignoreCase = true) }) return false
+    return TV_REGEX.containsMatchIn(q)
 }

@@ -136,6 +136,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var morpheInstallApp by mutableStateOf<com.orion.store.morphe.store.MorpheCatalogApp?>(null)
 
     fun toggleMorpheStore() {
+        if (tab == Tab.PC) return
         isMorpheStoreActive = !isMorpheStoreActive
         haptic(H.SELECTION)
         if (isMorpheStoreActive) {
@@ -1178,6 +1179,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun navTo(t: Tab) {
         if (t != Tab.ABOUT && t.name.lowercase() in s.hiddenTabs) return
+        if (t == Tab.PC && isMorpheStoreActive) {
+            isMorpheStoreActive = false
+            tabUpd { it.copy(sort = SortOption.HOME) }
+        }
         haptic(H.LIGHT); val was = tab; tab = t
         if (t != was && t.platform != null) followTab()
     }

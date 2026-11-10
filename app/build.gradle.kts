@@ -73,6 +73,7 @@ dependencies {
     implementation("io.github.iamr0s:Dhizuku-API:2.6.0")
     // Built-in wireless ADB: installs as the shell user, which skips the unverified-developer 24-hour wait
     implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
+    implementation("com.android.tools.build:apksig:8.7.0")
     implementation("org.bouncycastle:bcpkix-jdk15to18:1.81")
     implementation("org.conscrypt:conscrypt-android:2.7.0")
     implementation("com.unity3d.ads:unity-ads:4.21.0")

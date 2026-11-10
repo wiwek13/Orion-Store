@@ -72,7 +72,10 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
     val rows = remember(d, s, updateIds) { buildMyAppsRows(vm.allApps(), s, d, updateIds) }
     val pending = rows.filter { it.hasUpdate && it.status != "downloading" }
     val visible = rows.filter { it.matches(pageFilter) && it.matchesQuery(query) }
-    val queue = d.activeDownloads.size + d.readyToInstall.size
+    val patchJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsState()
+    val activePatchJobs = remember(patchJobs) { patchJobs.filter { it.stage.isActive } }
+    val failedPatchJobs = remember(patchJobs) { patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.FAILED } }
+    val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size
     val cs = MaterialTheme.colorScheme
     // Long-press an installed app to start picking, tap more to add them, then uninstall them together
     var picked by rememberSaveable { mutableStateOf(emptySet<String>()) }
@@ -91,6 +94,58 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                 FilterPills(vm, s.myAppsFilters) { f -> Choice(pageFilter == f, "${f.label} · ${rows.count { it.matches(f) }}", filterIcon(f)) {
                     scope.launch { pager.animateScrollToPage(filters.indexOf(f).coerceAtLeast(0)) }
                 } }
+            }
+        }
+        if (activePatchJobs.isNotEmpty() || failedPatchJobs.isNotEmpty()) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                activePatchJobs.forEach { job ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        color = cs.surfaceContainerHigh
+                    ) {
+                        Column(Modifier.padding(14.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Sym.Build, null, Modifier.size(18.dp), tint = cs.primary)
+                                Spacer(Modifier.width(8.dp))
+                                Text(job.params.appName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                                Text("${job.progress}%", style = MaterialTheme.typography.labelMedium, color = cs.primary)
+                                IconButton(onClick = { com.orion.store.morphe.store.JobStore.cancelJob(job.id) }, modifier = Modifier.size(28.dp)) {
+                                    Icon(Sym.Close, "Cancel", Modifier.size(16.dp))
+                                }
+                            }
+                            Spacer(Modifier.height(6.dp))
+                            Text(job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                            Spacer(Modifier.height(8.dp))
+                            LinearWavyProgressIndicator(
+                                progress = { job.progress / 100f },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                    }
+                }
+                failedPatchJobs.forEach { job ->
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(16.dp),
+                        color = cs.errorContainer
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(Sym.Warning, null, Modifier.size(20.dp), tint = cs.onErrorContainer)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text("${job.params.appName} Patch Failed", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = cs.onErrorContainer)
+                                Text(job.failureReason ?: job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onErrorContainer)
+                            }
+                            IconButton(onClick = { com.orion.store.morphe.store.JobStore.cancelJob(job.id) }) {
+                                Icon(Sym.Close, "Dismiss", tint = cs.onErrorContainer)
+                            }
+                        }
+                    }
+                }
             }
         }
         if (picked.isNotEmpty()) Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), shape = RoundedCornerShape(28.dp), color = cs.secondaryContainer, contentColor = cs.onSecondaryContainer, shadowElevation = 2.dp) {
@@ -259,6 +314,11 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                 action == "update" -> Primary("Update") { vm.download(r.app) }
                 action == "download" -> Primary("Download") { vm.download(r.app) }
                 action == "delete" -> IconButton({ vm.deleteLibraryApk(r.app) }) { Icon(Sym.DeleteOutline, "Delete APK") }
+                r.isPatched -> Primary("Repatch") {
+                    val pkg = r.app.packageName ?: r.app.id
+                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = pkg, name = r.app.name)
+                    vm.openMorpheInstall(morpheApp)
+                }
                 !r.isInstalledNow || !r.app.installsHere() -> Icon(Sym.ChevronRight, "Open details", tint = cs.onSurfaceVariant)
             }
             if (picked == null && r.isInstalledNow && r.app.installsHere() && r.status != "downloading") Box {

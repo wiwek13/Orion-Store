@@ -51,21 +51,55 @@ fun MorpheInstallSheet(
         universalPatches.groupBy { it.bundleName.ifEmpty { "Universal Patches" } }
     }
 
-    // Selected patch names - ONLY default app-specific patches are pre-selected!
+    // Selected patch names - starts EMPTY by default so user has full control
     val selectedPatches = remember(app.packageName) {
-        val initial = mutableSetOf<String>()
-        specificPatches.filter { it.isDefault }.forEach { initial.add(it.name) }
-        mutableStateListOf(*initial.toTypedArray())
+        mutableStateListOf<String>()
     }
 
-    // Expand state: App-specific bundles expanded by default, universal collapsed
+    // Expand state: ALL bundles COLLAPSED by default
     val expandedBundles = remember(app.packageName) {
-        mutableStateListOf<String>().apply { addAll(specificBundles.keys) }
+        mutableStateListOf<String>()
     }
     var showUniversalSection by remember { mutableStateOf(false) }
+    var patchSearchQuery by remember { mutableStateOf("") }
 
     val installedVersion = vm.s.installedVersions[app.packageName]
     val recommendedVersion = app.compatibleVersions.firstOrNull() ?: installedVersion ?: "Latest"
+
+    // Search filter across specific and universal bundles
+    val filteredSpecificBundles = remember(specificBundles, patchSearchQuery) {
+        if (patchSearchQuery.isBlank()) specificBundles
+        else {
+            specificBundles.mapValues { (_, patches) ->
+                patches.filter {
+                    it.name.contains(patchSearchQuery, ignoreCase = true) ||
+                    it.description.contains(patchSearchQuery, ignoreCase = true) ||
+                    it.bundleName.contains(patchSearchQuery, ignoreCase = true)
+                }
+            }.filterValues { it.isNotEmpty() }
+        }
+    }
+
+    val filteredUniversalBundles = remember(universalBundles, patchSearchQuery) {
+        if (patchSearchQuery.isBlank()) universalBundles
+        else {
+            universalBundles.mapValues { (_, patches) ->
+                patches.filter {
+                    it.name.contains(patchSearchQuery, ignoreCase = true) ||
+                    it.description.contains(patchSearchQuery, ignoreCase = true) ||
+                    it.bundleName.contains(patchSearchQuery, ignoreCase = true)
+                }
+            }.filterValues { it.isNotEmpty() }
+        }
+    }
+
+    // Auto-expand matching bundles when actively searching
+    LaunchedEffect(patchSearchQuery) {
+        if (patchSearchQuery.isNotBlank()) {
+            filteredSpecificBundles.keys.forEach { if (!expandedBundles.contains(it)) expandedBundles.add(it) }
+            if (filteredUniversalBundles.isNotEmpty()) showUniversalSection = true
+        }
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -120,6 +154,10 @@ fun MorpheInstallSheet(
                             Surface(shape = RoundedCornerShape(8.dp), color = cs.tertiaryContainer) {
                                 Text("Installed v$installedVersion", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = cs.onTertiaryContainer, maxLines = 1)
                             }
+                        } else {
+                            Surface(shape = RoundedCornerShape(8.dp), color = cs.surfaceContainerHigh) {
+                                Text("Not Installed", Modifier.padding(horizontal = 7.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = cs.onSurfaceVariant, maxLines = 1)
+                            }
                         }
                     }
                 }
@@ -129,14 +167,50 @@ fun MorpheInstallSheet(
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
+
+            // Search Bar for all patches
+            OutlinedTextField(
+                value = patchSearchQuery,
+                onValueChange = { patchSearchQuery = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(52.dp),
+                placeholder = {
+                    Text(
+                        "Search all patches (e.g. adblock, theme...)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = cs.onSurfaceVariant
+                    )
+                },
+                leadingIcon = {
+                    Icon(Sym.Search, null, Modifier.size(20.dp), tint = cs.onSurfaceVariant)
+                },
+                trailingIcon = {
+                    if (patchSearchQuery.isNotEmpty()) {
+                        IconButton(onClick = { patchSearchQuery = "" }) {
+                            Icon(Sym.Close, "Clear", Modifier.size(18.dp), tint = cs.onSurfaceVariant)
+                        }
+                    }
+                },
+                shape = RoundedCornerShape(14.dp),
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = cs.surfaceContainerHigh,
+                    unfocusedContainerColor = cs.surfaceContainerHigh,
+                    focusedBorderColor = cs.primary,
+                    unfocusedBorderColor = Color.Transparent
+                )
+            )
+
+            Spacer(Modifier.height(10.dp))
 
             // Patch selection list grouped by Bundle
             LazyColumn(
                 Modifier
                     .fillMaxWidth()
                     .weight(1f, fill = false)
-                    .heightIn(max = 440.dp),
+                    .heightIn(max = 420.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 // Section: App-Specific Bundles
@@ -147,7 +221,7 @@ fun MorpheInstallSheet(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            "App Bundles (${specificBundles.size}) · ${specificPatches.size} patches",
+                            "App Bundles (${filteredSpecificBundles.size}) · ${specificPatches.size} patches",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = cs.primary
@@ -169,7 +243,7 @@ fun MorpheInstallSheet(
                     }
                 }
 
-                if (specificBundles.isEmpty()) {
+                if (filteredSpecificBundles.isEmpty()) {
                     item {
                         Surface(
                             Modifier.fillMaxWidth(),
@@ -177,7 +251,8 @@ fun MorpheInstallSheet(
                             color = cs.surfaceContainerHigh
                         ) {
                             Text(
-                                "No app-specific bundles found. Universal patches below can still be configured and applied.",
+                                if (patchSearchQuery.isNotBlank()) "No patches matching \"$patchSearchQuery\" in app bundles."
+                                else "No app-specific bundles found. Universal patches below can still be applied.",
                                 modifier = Modifier.padding(14.dp),
                                 style = MaterialTheme.typography.bodySmall,
                                 color = cs.onSurfaceVariant
@@ -185,7 +260,7 @@ fun MorpheInstallSheet(
                         }
                     }
                 } else {
-                    items(specificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
+                    items(filteredSpecificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
                         val isExpanded = expandedBundles.contains(bundleName)
                         BundleAccordionCard(
                             bundleName = bundleName,
@@ -212,7 +287,7 @@ fun MorpheInstallSheet(
                 }
 
                 // Section: Universal Bundles (Collapsible)
-                if (universalBundles.isNotEmpty()) {
+                if (filteredUniversalBundles.isNotEmpty()) {
                     item {
                         Row(
                             Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 4.dp),
@@ -220,7 +295,7 @@ fun MorpheInstallSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Universal Bundles (${universalBundles.size}) · ${universalPatches.size} patches",
+                                "Universal Bundles (${filteredUniversalBundles.size}) · ${universalPatches.size} patches",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold,
                                 color = cs.secondary
@@ -235,7 +310,7 @@ fun MorpheInstallSheet(
                     }
 
                     if (showUniversalSection) {
-                        items(universalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
+                        items(filteredUniversalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
                             val isExpanded = expandedBundles.contains("univ-$bundleName")
                             BundleAccordionCard(
                                 bundleName = bundleName,
@@ -263,52 +338,81 @@ fun MorpheInstallSheet(
                 }
             }
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
 
-            // Action footer
-            Row(
-                Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+            // Solid, uncollapsible Bottom Action Dock
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(20.dp),
+                color = cs.surfaceContainerHigh,
+                tonalElevation = 6.dp
             ) {
-                Column {
-                    Text(
-                        "${selectedPatches.size} patches selected",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        "Target: v$recommendedVersion",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = cs.onSurfaceVariant
-                    )
-                }
-
-                Button(
-                    onClick = {
-                        val params = PatchJobParams(
-                            id = java.util.UUID.randomUUID().toString(),
-                            packageName = app.packageName,
-                            appName = app.name,
-                            targetVersion = recommendedVersion,
-                            selectedPatchIds = selectedPatches.toList()
-                        )
-                        JobStore.enqueue(params)
-                        vm.haptic(H.SUCCESS)
-                        onDismiss()
-                        scope.launch {
-                            vm.snackbar.showSnackbar(
-                                message = "Started patching ${app.name} (${selectedPatches.size} patches). Installing automatically when ready...",
-                                withDismissAction = true
-                            )
-                        }
-                    },
-                    enabled = selectedPatches.isNotEmpty(),
-                    shapes = ButtonDefaults.shapes()
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Icon(Sym.Build, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Queue & Build")
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 12.dp)
+                    ) {
+                        Text(
+                            if (selectedPatches.isEmpty()) "No patches selected" else "${selectedPatches.size} patches selected",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            "Target: v$recommendedVersion",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val params = PatchJobParams(
+                                id = java.util.UUID.randomUUID().toString(),
+                                packageName = app.packageName,
+                                appName = app.name,
+                                targetVersion = recommendedVersion,
+                                selectedPatchIds = selectedPatches.toList()
+                            )
+                            JobStore.enqueue(params)
+                            vm.haptic(H.SUCCESS)
+                            onDismiss()
+                            scope.launch {
+                                vm.snackbar.showSnackbar(
+                                    message = "Started patching ${app.name} (${selectedPatches.size} patches)...",
+                                    withDismissAction = true
+                                )
+                            }
+                        },
+                        enabled = selectedPatches.isNotEmpty(),
+                        modifier = Modifier
+                            .height(48.dp)
+                            .defaultMinSize(minWidth = 148.dp),
+                        shape = RoundedCornerShape(24.dp),
+                        contentPadding = PaddingValues(horizontal = 18.dp, vertical = 10.dp)
+                    ) {
+                        Icon(Sym.Build, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Queue & Build",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
                 }
             }
         }

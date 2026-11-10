@@ -48,4 +48,27 @@ class KeyStoreManagerTest {
         val bundle = KeyStoreManager.exportEncryptedBundle(keyPair, cert, alias, correctPass)
         KeyStoreManager.importEncryptedBundle(bundle, wrongPass)
     }
+
+    @Test
+    fun `test sign apk with apksig v1 v2 v3 engine`() {
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir", "/tmp"), "morphe_test_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+        val dummyApk = java.io.File(tempDir, "dummy.apk")
+        val signedApk = java.io.File(tempDir, "signed.apk")
+
+        // Create a minimal valid zip file
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(dummyApk)).use { zos ->
+            val entry = java.util.zip.ZipEntry("AndroidManifest.xml")
+            zos.putNextEntry(entry)
+            zos.write("<manifest/>".toByteArray())
+            zos.closeEntry()
+        }
+
+        val success = KeyStoreManager.signApkFile(dummyApk, signedApk)
+        assertTrue("Signing should succeed", success)
+        assertTrue("Signed APK file should exist", signedApk.exists())
+        assertTrue("Signed APK size should be greater than zero", signedApk.length() > 0L)
+
+        tempDir.deleteRecursively()
+    }
 }

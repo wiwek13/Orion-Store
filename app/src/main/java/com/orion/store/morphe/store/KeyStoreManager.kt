@@ -300,104 +300,24 @@ object KeyStoreManager {
 
             outputApk.parentFile?.mkdirs()
 
-            val manifestEntries = StringBuilder()
-            manifestEntries.append("Manifest-Version: 1.0\r\n")
-            manifestEntries.append("Created-By: 1.0 (Morphe Orion APK Signer)\r\n\r\n")
+            // Use Google Android official apksig engine for full v1 + v2 + v3 signing and auto-zipalign
+            val signerConfig = com.android.apksig.ApkSigner.SignerConfig.Builder(
+                useAlias,
+                privateKey,
+                listOf(cert)
+            ).build()
 
-            val fileDigests = mutableMapOf<String, String>()
-            val sha256 = MessageDigest.getInstance("SHA-256")
+            val builder = com.android.apksig.ApkSigner.Builder(listOf(signerConfig))
+                .setInputApk(inputApk)
+                .setOutputApk(outputApk)
+                .setV1SigningEnabled(true)
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(true)
+                .setMinSdkVersion(26)
 
-            ZipFile(inputApk).use { zip ->
-                val entries = zip.entries()
-                while (entries.hasMoreElements()) {
-                    val entry = entries.nextElement()
-                    val name = entry.name
-                    // Skip old signature files
-                    if (name.startsWith("META-INF/") && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC") || name == "META-INF/MANIFEST.MF")) {
-                        continue
-                    }
-                    if (entry.isDirectory) continue
+            builder.build().sign()
 
-                    val bytes = zip.getInputStream(entry).use { it.readBytes() }
-                    val digest = Base64.encodeToString(sha256.digest(bytes), Base64.NO_WRAP)
-                    fileDigests[name] = digest
-
-                    manifestEntries.append("Name: $name\r\n")
-                    manifestEntries.append("SHA-256-Digest: $digest\r\n\r\n")
-                }
-            }
-
-            val manifestBytes = manifestEntries.toString().toByteArray(Charsets.UTF_8)
-            val manifestDigest = Base64.encodeToString(sha256.digest(manifestBytes), Base64.NO_WRAP)
-
-            // Generate CERT.SF
-            val sfBuilder = StringBuilder()
-            sfBuilder.append("Signature-Version: 1.0\r\n")
-            sfBuilder.append("Created-By: 1.0 (Morphe Orion APK Signer)\r\n")
-            sfBuilder.append("SHA-256-Digest-Manifest: $manifestDigest\r\n\r\n")
-
-            for ((name, _) in fileDigests) {
-                val entrySection = "Name: $name\r\nSHA-256-Digest: ${fileDigests[name]}\r\n\r\n"
-                val entryDigest = Base64.encodeToString(sha256.digest(entrySection.toByteArray(Charsets.UTF_8)), Base64.NO_WRAP)
-                sfBuilder.append("Name: $name\r\n")
-                sfBuilder.append("SHA-256-Digest: $entryDigest\r\n\r\n")
-            }
-
-            val sfBytes = sfBuilder.toString().toByteArray(Charsets.UTF_8)
-
-            // Generate CERT.RSA using BouncyCastle CMS SignedData
-            val certHolder = JcaX509CertificateHolder(cert)
-            val signerInfoGen = JcaSignerInfoGeneratorBuilder(
-                JcaDigestCalculatorProviderBuilder().build()
-            ).build(JcaContentSignerBuilder("SHA256withRSA").build(privateKey), certHolder)
-
-            val cmsGen = CMSSignedDataGenerator()
-            cmsGen.addSignerInfoGenerator(signerInfoGen)
-            cmsGen.addCertificate(certHolder)
-
-            val cmsProcessable = CMSProcessableByteArray(sfBytes)
-            val signedData = cmsGen.generate(cmsProcessable, true)
-            val certRsaBytes = signedData.encoded
-
-            // Write output APK
-            ZipOutputStream(FileOutputStream(outputApk)).use { zos ->
-                // Write MANIFEST.MF
-                val mEntry = ZipEntry("META-INF/MANIFEST.MF")
-                zos.putNextEntry(mEntry)
-                zos.write(manifestBytes)
-                zos.closeEntry()
-
-                // Write CERT.SF
-                val sfEntry = ZipEntry("META-INF/CERT.SF")
-                zos.putNextEntry(sfEntry)
-                zos.write(sfBytes)
-                zos.closeEntry()
-
-                // Write CERT.RSA
-                val rsaEntry = ZipEntry("META-INF/CERT.RSA")
-                zos.putNextEntry(rsaEntry)
-                zos.write(certRsaBytes)
-                zos.closeEntry()
-
-                // Copy all other original entries
-                ZipFile(inputApk).use { zip ->
-                    val entries = zip.entries()
-                    while (entries.hasMoreElements()) {
-                        val entry = entries.nextElement()
-                        val name = entry.name
-                        if (name.startsWith("META-INF/") && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC") || name == "META-INF/MANIFEST.MF")) {
-                            continue
-                        }
-                        val newEntry = ZipEntry(name)
-                        newEntry.time = entry.time
-                        zos.putNextEntry(newEntry)
-                        zip.getInputStream(entry).use { it.copyTo(zos) }
-                        zos.closeEntry()
-                    }
-                }
-            }
-
-            true
+            outputApk.exists() && outputApk.length() > 0L
         } catch (e: Exception) {
             e.printStackTrace()
             false

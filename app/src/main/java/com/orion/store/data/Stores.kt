@@ -41,6 +41,7 @@ import kotlin.math.max
     val isOled: Boolean = false,
     val materialYouEnabled: Boolean = false,
     val morpheEnabled: Boolean = false,
+    val morpheRemovedRepoUrls: Set<String> = emptySet(),
     val navConfig: NavConfigState = NavConfigState(),
     val hiddenTabs: List<String> = emptyList(),
     val virusTotalApiKey: String = "",

@@ -1,15 +1,23 @@
 package com.orion.store.morphe.store
 
+import com.orion.store.OrionApp
 import com.orion.store.morphe.model.PatchedApp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.io.File
 
 /**
  * Registry of installed patched applications managed by Morphe.
+ * Persisted to disk via JSON so patched apps survive across app restarts.
  */
 object PatchedAppStore {
+
+    private const val FILE_NAME = "morphe_patched_apps.json"
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true; encodeDefaults = true }
 
     private val _apps = MutableStateFlow<List<PatchedApp>>(emptyList())
     val apps: StateFlow<List<PatchedApp>> = _apps.asStateFlow()
@@ -17,45 +25,34 @@ object PatchedAppStore {
     private val _attentionCount = MutableStateFlow(0)
     val attentionCount: StateFlow<Int> = _attentionCount.asStateFlow()
 
+    private val storageFile: File
+        get() = File(OrionApp.instance.filesDir, FILE_NAME)
+
     init {
-        // Initial sample data for immediate visibility
-        _apps.value = listOf(
-            PatchedApp(
-                packageName = "app.revanced.android.youtube",
-                appName = "YouTube ReVanced",
-                installedVersion = "19.16.39",
-                targetVersion = "19.16.39",
-                patchBundleId = "morphe-revanced-bundle",
-                patchBundleVersion = "4.6.1",
-                appliedPatches = listOf("sponsorblock", "return-youtube-dislike", "hide-shorts", "microg-support", "amoled-black"),
-                needsAttention = true,
-                attentionReason = "Patch bundle v4.7.0 available with critical playback fixes",
-                availablePatchUpdate = "4.7.0"
-            ),
-            PatchedApp(
-                packageName = "com.spotify.music",
-                appName = "Spotify Mod",
-                installedVersion = "8.9.18.512",
-                targetVersion = "8.9.18.512",
-                patchBundleId = "morphe-audio-bundle",
-                patchBundleVersion = "1.2.0",
-                appliedPatches = listOf("amoled-theme", "hide-podcasts", "clean-navbar"),
-                needsAttention = false
-            ),
-            PatchedApp(
-                packageName = "org.telegram.messenger",
-                appName = "Telegram Morphe",
-                installedVersion = "10.11.1",
-                targetVersion = "10.11.1",
-                patchBundleId = "morphe-tg-bundle",
-                patchBundleVersion = "2.0.4",
-                appliedPatches = listOf("anti-delete-messages", "disable-stories", "custom-accent"),
-                needsAttention = true,
-                attentionReason = "Source app update available: v10.12.0",
-                availableAppUpdate = "10.12.0"
-            )
-        )
-        recalculateAttention()
+        loadFromDisk()
+    }
+
+    private fun loadFromDisk() {
+        try {
+            val file = storageFile
+            if (file.exists() && file.length() > 0L) {
+                val list = json.decodeFromString<List<PatchedApp>>(file.readText())
+                _apps.value = list
+                recalculateAttention()
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    private fun saveToDisk() {
+        try {
+            val file = storageFile
+            val text = json.encodeToString(_apps.value)
+            file.writeText(text)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun recalculateAttention() {
@@ -67,11 +64,13 @@ object PatchedAppStore {
             listOf(app) + list.filterNot { it.packageName == app.packageName }
         }
         recalculateAttention()
+        saveToDisk()
     }
 
     fun removeApp(packageName: String) {
         _apps.update { list -> list.filterNot { it.packageName == packageName } }
         recalculateAttention()
+        saveToDisk()
     }
 
     fun getApp(packageName: String): PatchedApp? {

@@ -17,7 +17,8 @@ fun AppItem.installsHere() = platform == Platform.ANDROID || (platform == Platfo
 enum class SortOption(val label: String) {
     HOME("Home Page"), NEWEST("Recently Added"), OLDEST("Oldest Added"), NAME_ASC("Name (A-Z)"),
     NAME_DESC("Name (Z-A)"), SIZE_ASC("Size (Smallest)"), SIZE_DESC("Size (Largest)"),
-    MOST_PATCHES("Most Patches"), MOST_DOWNLOADS("Most Downloads")
+    MOST_PATCHES("Most Patches"), MOST_DOWNLOADS("Most Downloads"),
+    FEATURED("Featured"), UPDATED("Recently Updated")
 }
 
 enum class Tab(val platform: String?) {

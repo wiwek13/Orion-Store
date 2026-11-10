@@ -25,7 +25,10 @@ data class MorpheCatalogApp(
     val compatibleVersions: List<String> = emptyList(),
     val patchCount: Int = 0,
     val bundleCount: Int = 0,
-    val bundleNames: List<String> = emptyList()
+    val bundleNames: List<String> = emptyList(),
+    val firstSeen: Long = 0,
+    val updatedAt: Long = 0,
+    val featuredRank: Int = Int.MAX_VALUE
 )
 
 @Serializable
@@ -165,14 +168,28 @@ object MorpheCatalogRepository {
             val appPatchesMap = mutableMapOf<String, MutableList<MorpheCatalogPatch>>()
             val appBundlesMap = mutableMapOf<String, MutableSet<String>>()
             val appVersionsMap = mutableMapOf<String, MutableSet<String>>()
+            val appUpdatesMap = mutableMapOf<String, Long>()
             val universalList = mutableListOf<MorpheCatalogPatch>()
             val seenUniversal = mutableSetOf<String>()
+            val removedUrls = com.orion.store.ui.Store.settings.value.morpheRemovedRepoUrls
+            val featuredArr = root["featured"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+            val featuredMap = featuredArr.mapIndexed { idx, pkg -> pkg to idx }.toMap()
 
             for (bundleElement in bundlesArr) {
                 val bObj = bundleElement as? JsonObject ?: continue
                 val bundleName = bObj["name"]?.jsonPrimitive?.contentOrNull ?: "Morphe Bundle"
                 val bundleAuthor = bObj["author"]?.jsonPrimitive?.contentOrNull ?: ""
+                val bundleUrl = bObj["repositoryUrl"]?.jsonPrimitive?.contentOrNull ?: ""
+                if (bundleUrl in removedUrls || bundleName in removedUrls || bundleAuthor in removedUrls) {
+                    continue
+                }
+
                 val targetApps = bObj["targetApps"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+                val bUpdated = bObj["updatedAt"]?.jsonPrimitive?.longOrNull ?: bObj["firstSeen"]?.jsonPrimitive?.longOrNull ?: 0L
+                for (t in targetApps) {
+                    val prev = appUpdatesMap[t] ?: 0L
+                    if (bUpdated > prev) appUpdatesMap[t] = bUpdated
+                }
                 val patchesArr = bObj["patches"]?.jsonArray ?: continue
 
                 for (appPkg in targetApps) {
@@ -183,11 +200,29 @@ object MorpheCatalogRepository {
                     val pObj = pElement as? JsonObject ?: continue
                     val patchName = pObj["name"]?.jsonPrimitive?.contentOrNull ?: continue
                     val patchDesc = pObj["description"]?.jsonPrimitive?.contentOrNull ?: ""
-                    val isDefault = pObj["default"]?.jsonPrimitive?.booleanOrNull ?: true
+                    val isDefault = pObj["default"]?.jsonPrimitive?.booleanOrNull ?: false
                     val cpk = pObj["compatiblePackagesKey"]?.jsonPrimitive?.intOrNull
+                        ?: pObj["compatibilityKey"]?.jsonPrimitive?.intOrNull
 
-                    if (cpk == null) {
-                        // Universal patch
+                    val assignedPkgs = mutableSetOf<String>()
+                    val assignedVers = mutableSetOf<String>()
+
+                    if (cpk != null && cpk in parsedComps.indices) {
+                        val compPkgs = parsedComps[cpk]
+                        for ((pkg, vers) in compPkgs) {
+                            assignedPkgs.add(pkg)
+                            assignedVers.addAll(vers)
+                            appVersionsMap.getOrPut(pkg) { mutableSetOf() }.addAll(vers)
+                        }
+                    }
+
+                    // If bundle defines targetApps, this patch applies to those target apps!
+                    if (targetApps.isNotEmpty()) {
+                        assignedPkgs.addAll(targetApps)
+                    }
+
+                    if (assignedPkgs.isEmpty()) {
+                        // Truly universal patch
                         if (seenUniversal.add(patchName.lowercase())) {
                             universalList.add(
                                 MorpheCatalogPatch(
@@ -200,12 +235,13 @@ object MorpheCatalogRepository {
                                 )
                             )
                         }
-                    } else if (cpk in parsedComps.indices) {
-                        val compPkgs = parsedComps[cpk]
-                        for ((pkg, vers) in compPkgs) {
+                    } else {
+                        // App-specific patch
+                        for (pkg in assignedPkgs) {
+                            if (assignedVers.isNotEmpty()) {
+                                appVersionsMap.getOrPut(pkg) { mutableSetOf() }.addAll(assignedVers)
+                            }
                             appBundlesMap.getOrPut(pkg) { mutableSetOf() }.add(bundleName)
-                            appVersionsMap.getOrPut(pkg) { mutableSetOf() }.addAll(vers)
-
                             val patch = MorpheCatalogPatch(
                                 name = patchName,
                                 description = patchDesc,
@@ -214,7 +250,7 @@ object MorpheCatalogRepository {
                                 bundleName = bundleName,
                                 bundleAuthor = bundleAuthor,
                                 compatiblePackages = listOf(pkg),
-                                targetVersions = vers
+                                targetVersions = assignedVers.toList()
                             )
                             appPatchesMap.getOrPut(pkg) { mutableListOf() }.add(patch)
                         }
@@ -233,6 +269,9 @@ object MorpheCatalogRepository {
                 val iconUrl = appObj["iconUrl"]?.jsonPrimitive?.contentOrNull ?: ""
                 val desc = appObj["description"]?.jsonPrimitive?.contentOrNull ?: ""
                 val installs = appObj["installs"]?.jsonPrimitive?.longOrNull ?: 0L
+                val firstSeen = appObj["firstSeen"]?.jsonPrimitive?.longOrNull ?: 0L
+                val updatedAt = maxOf(appUpdatesMap[pkg] ?: 0L, firstSeen)
+                val featuredRank = featuredMap[pkg] ?: Int.MAX_VALUE
 
                 catsSet.add(cat)
 
@@ -251,7 +290,10 @@ object MorpheCatalogRepository {
                         compatibleVersions = versions,
                         patchCount = specificPatches.size,
                         bundleCount = bundles.size,
-                        bundleNames = bundles
+                        bundleNames = bundles,
+                        firstSeen = firstSeen,
+                        updatedAt = updatedAt,
+                        featuredRank = featuredRank
                     )
                 )
             }
