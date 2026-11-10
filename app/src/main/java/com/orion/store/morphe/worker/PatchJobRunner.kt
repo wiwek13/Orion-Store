@@ -222,6 +222,12 @@ object PatchJobRunner {
                     signedApk.copyTo(finalApk, overwrite = true)
                     if (DownloadOrchestrator.isApkValid(finalApk)) {
                         finalApkFile = finalApk
+                        // Automatically clean older patched APKs for this app, retaining only this latest build
+                        PatchStorageCleaner.cleanOlderPatchedApks(
+                            appName = currentJob.params.appName,
+                            packageName = currentJob.params.packageName,
+                            keepFile = finalApk
+                        )
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()

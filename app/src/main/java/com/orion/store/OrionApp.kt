@@ -10,6 +10,7 @@ import com.orion.store.data.Device
 import com.orion.store.data.Net
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.orion.store.ui.Store
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 
 class OrionApp : Application(), SingletonImageLoader.Factory {
@@ -29,6 +30,9 @@ class OrionApp : Application(), SingletonImageLoader.Factory {
             packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_LEANBACK)
         val am = getSystemService(android.app.ActivityManager::class.java)
         Device.lowEnd = am.isLowRamDevice || android.app.ActivityManager.MemoryInfo().also(am::getMemoryInfo).totalMem < 4L * 1024 * 1024 * 1024
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            com.orion.store.platform.PatchStorageCleaner.sweepExpiredSessions(this@OrionApp)
+        }
     }
 
     /** Remote images fade in, except in Lite. Boost keeps more decoded images in memory, so scrolling back never reloads them. Applies on the next start. */

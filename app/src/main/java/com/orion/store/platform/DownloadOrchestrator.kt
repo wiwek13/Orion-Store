@@ -46,8 +46,63 @@ object DownloadOrchestrator {
         val resolvedVersion: String
     )
 
+    fun getBaseCacheDir(context: Context, packageName: String): File {
+        val dir = File(context.filesDir, "base_apk_cache/$packageName")
+        dir.mkdirs()
+        return dir
+    }
+
+    private fun resolveFromBaseCache(
+        context: Context,
+        packageName: String,
+        requestedVersion: String,
+        targetDir: File
+    ): ResolvedApk? {
+        val cacheDir = getBaseCacheDir(context, packageName)
+        if (!cacheDir.exists()) return null
+
+        val cleanReq = requestedVersion.trim().removePrefix("v").lowercase()
+        val isAnyVersion = cleanReq.isBlank() || cleanReq == "recommended" || cleanReq == "latest"
+
+        val candidates = cacheDir.listFiles()?.filter { file ->
+            file.extension.equals("apk", ignoreCase = true) && isApkValid(file)
+        } ?: return null
+
+        if (candidates.isEmpty()) return null
+
+        val chosen = if (isAnyVersion) {
+            candidates.maxByOrNull { it.lastModified() }
+        } else {
+            candidates.firstOrNull { it.name.lowercase().contains(cleanReq) }
+                ?: candidates.maxByOrNull { it.lastModified() }
+        } ?: return null
+
+        val dest = File(targetDir, "cached_base.apk")
+        chosen.copyTo(dest, overwrite = true)
+        if (isApkValid(dest)) {
+            val ver = chosen.name.substringAfterLast("_").substringBeforeLast(".apk")
+            return ResolvedApk(dest, emptyList(), "Cached Base APK (Reused)", ver)
+        }
+        return null
+    }
+
+    fun cacheBaseApk(context: Context, packageName: String, version: String, baseFile: File) {
+        try {
+            if (!isApkValid(baseFile)) return
+            val cacheDir = getBaseCacheDir(context, packageName)
+            val cleanVer = version.ifBlank { "latest" }.replace(" ", "_")
+            val target = File(cacheDir, "base_${packageName}_$cleanVer.apk")
+            baseFile.copyTo(target, overwrite = true)
+            // Automatically clean older base APKs for this package
+            PatchStorageCleaner.cleanOlderBaseApks(context, packageName, target)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
     /**
      * Resolves and downloads base APK for [packageName] and [versionName] into [targetDir].
+     * Avoids re-downloading if already cached/downloaded, and cleans older versions automatically.
      */
     suspend fun resolveAndDownload(
         context: Context,
@@ -85,15 +140,33 @@ object DownloadOrchestrator {
                     }
                 }
                 if (isApkValid(base)) {
+                    cacheBaseApk(context, packageName, installedVer, base)
                     return@withContext ResolvedApk(base, splits, "Device Extraction", installedVer)
                 }
             }
         }
 
+        // Step 1: Check persistent base APK cache (DO NOT REDOWNLOAD if already downloaded!)
+        onProgress("Checking local APK cache...", 8)
+        val cachedResult = resolveFromBaseCache(context, packageName, requestedVersion, targetDir)
+        if (cachedResult != null && isApkValid(cachedResult.baseApk)) {
+            onProgress("Reusing already downloaded base APK...", 20)
+            return@withContext cachedResult
+        }
+
+        // Step 2: Check local Downloads directory before hitting network
+        val localResult = resolveFromLocalDownloads(context, packageName, appName, targetDir)
+        if (localResult != null && isApkValid(localResult.baseApk)) {
+            onProgress("Using APK found in Downloads...", 20)
+            cacheBaseApk(context, packageName, localResult.resolvedVersion, localResult.baseApk)
+            return@withContext localResult
+        }
+
         // Tier 1: Orion Store Native Downloader
-        onProgress("Checking Orion Store repository...", 10)
+        onProgress("Checking Orion Store repository...", 12)
         val orionResult = resolveFromOrionStore(packageName, requestedVersion, targetDir, onProgress)
         if (orionResult != null && isApkValid(orionResult.baseApk)) {
+            cacheBaseApk(context, packageName, orionResult.resolvedVersion, orionResult.baseApk)
             return@withContext orionResult
         }
 
@@ -101,6 +174,7 @@ object DownloadOrchestrator {
         // Fallback 1: GitHub Official Releases (for open-source apps like Brave Browser)
         val githubResult = resolveFromGitHubReleases(packageName, requestedVersion, targetDir, onProgress)
         if (githubResult != null && isApkValid(githubResult.baseApk)) {
+            cacheBaseApk(context, packageName, githubResult.resolvedVersion, githubResult.baseApk)
             return@withContext githubResult
         }
 
@@ -108,35 +182,32 @@ object DownloadOrchestrator {
         onProgress("Resolving from APKPure repository...", 20)
         val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
         if (apkPureResult != null && isApkValid(apkPureResult.baseApk)) {
+            cacheBaseApk(context, packageName, apkPureResult.resolvedVersion, apkPureResult.baseApk)
             return@withContext apkPureResult
         }
 
-        // Fallback 2: Google Play (goopdl / GPlay API)
+        // Fallback 3: Google Play (goopdl / GPlay API)
         onProgress("Resolving from Google Play (goopdl)...", 40)
         val gplayResult = resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress)
         if (gplayResult != null && isApkValid(gplayResult.baseApk)) {
+            cacheBaseApk(context, packageName, gplayResult.resolvedVersion, gplayResult.baseApk)
             return@withContext gplayResult
         }
 
-        // Fallback 3: Uptodown Resolver
+        // Fallback 4: Uptodown Resolver
         onProgress("Resolving from Uptodown repository...", 55)
         val uptodownResult = resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress)
         if (uptodownResult != null && isApkValid(uptodownResult.baseApk)) {
+            cacheBaseApk(context, packageName, uptodownResult.resolvedVersion, uptodownResult.baseApk)
             return@withContext uptodownResult
         }
 
-        // Fallback 4: APKCombo Resolver
+        // Fallback 5: APKCombo Resolver
         onProgress("Resolving from APKCombo repository...", 70)
         val apkComboResult = resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress)
         if (apkComboResult != null && isApkValid(apkComboResult.baseApk)) {
+            cacheBaseApk(context, packageName, apkComboResult.resolvedVersion, apkComboResult.baseApk)
             return@withContext apkComboResult
-        }
-
-        // Fallback 5: Local Downloads search (Orion Downloads & /sdcard/Download)
-        onProgress("Checking local Downloads directory...", 85)
-        val localResult = resolveFromLocalDownloads(context, packageName, appName, targetDir)
-        if (localResult != null && isApkValid(localResult.baseApk)) {
-            return@withContext localResult
         }
 
         // Fallback 6: If app is installed on device at any version, use it rather than failing

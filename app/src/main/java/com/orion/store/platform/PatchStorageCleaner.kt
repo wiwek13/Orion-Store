@@ -97,33 +97,91 @@ object PatchStorageCleaner {
     }
 
     /**
+     * Automatically cleans older patched APKs for [appName] / [packageName] in Downloads.
+     * Retains ONLY the single latest build [keepFile].
+     */
+    fun cleanOlderPatchedApks(appName: String, packageName: String, keepFile: File) {
+        try {
+            val dir = Downloads.dir()
+            if (!dir.exists()) return
+            val cleanApp = appName.replace(" ", "_").lowercase()
+            val cleanPkg = packageName.lowercase()
+
+            dir.listFiles()?.forEach { file ->
+                if (file.absolutePath != keepFile.absolutePath && file.isFile) {
+                    val name = file.name.lowercase()
+                    val isOldPatchedBuild = (name.startsWith("patched_") || name.contains("_patched")) &&
+                        (name.contains(cleanApp) || name.contains(cleanPkg))
+                    if (isOldPatchedBuild) {
+                        file.delete()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
+     * Cleans older cached base APKs for [packageName], retaining only [keepFile].
+     */
+    fun cleanOlderBaseApks(context: Context, packageName: String, keepFile: File) {
+        try {
+            val baseCacheDir = File(context.filesDir, "base_apk_cache/$packageName")
+            if (!baseCacheDir.exists()) return
+            baseCacheDir.listFiles()?.forEach { file ->
+                if (file.absolutePath != keepFile.absolutePath && file.isFile) {
+                    file.delete()
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+    }
+
+    /**
      * Startup & periodic sweep:
      * Purges all patcher_session/ folders older than 1 hour across all packages.
      */
     fun sweepExpiredSessions(context: Context) {
         try {
             val rootSessionDir = File(context.cacheDir, "patcher_session")
-            if (!rootSessionDir.exists() || !rootSessionDir.isDirectory) return
-
-            val now = System.currentTimeMillis()
-
-            rootSessionDir.listFiles()?.forEach { pkgDir ->
-                if (pkgDir.isDirectory) {
-                    pkgDir.listFiles()?.forEach { sessionDir ->
-                        if (sessionDir.isDirectory) {
-                            val lastMod = sessionDir.lastModified()
-                            if (now - lastMod > SESSION_EXPIRY_MS) {
-                                sessionDir.deleteRecursively()
+            if (rootSessionDir.exists() && rootSessionDir.isDirectory) {
+                val now = System.currentTimeMillis()
+                rootSessionDir.listFiles()?.forEach { pkgDir ->
+                    if (pkgDir.isDirectory) {
+                        pkgDir.listFiles()?.forEach { sessionDir ->
+                            if (sessionDir.isDirectory) {
+                                val lastMod = sessionDir.lastModified()
+                                if (now - lastMod > SESSION_EXPIRY_MS) {
+                                    sessionDir.deleteRecursively()
+                                }
                             }
                         }
+                        if (pkgDir.listFiles().isNullOrEmpty()) {
+                            pkgDir.delete()
+                        }
                     }
-                    if (pkgDir.listFiles().isNullOrEmpty()) {
-                        pkgDir.delete()
+                }
+            }
+
+            // Clean incomplete .part and .tmp files in Downloads.dir()
+            runCatching {
+                val dlDir = Downloads.dir()
+                if (dlDir.exists()) {
+                    dlDir.listFiles()?.forEach { f ->
+                        val n = f.name.lowercase()
+                        if (n.endsWith(".part") || n.endsWith(".tmp")) {
+                            if (System.currentTimeMillis() - f.lastModified() > 10 * 60 * 1000L) {
+                                f.delete()
+                            }
+                        }
                     }
                 }
             }
 
             // Also clean legacy temporary files in cache root
+            val now = System.currentTimeMillis()
             context.cacheDir?.listFiles()?.forEach { f ->
                 val n = f.name.lowercase()
                 if (n.startsWith("source_") || n.startsWith("patched_") || n.startsWith("aligned_") || n.startsWith("signed_")) {
