@@ -307,6 +307,40 @@ object MetaMorpheScraper {
                     else -> JsonArray(emptyList())
                 }
 
+                // Parse root compatibilities lookup
+                val compsArr = when (element) {
+                    is JsonObject -> element["compatibilities"]?.jsonArray ?: element["compatibility"]?.jsonArray
+                    else -> null
+                }
+                val parsedComps = ArrayList<Map<String, List<String>>>()
+                if (compsArr != null) {
+                    for (compElement in compsArr) {
+                        val pkgMap = mutableMapOf<String, List<String>>()
+                        when (compElement) {
+                            is JsonArray -> {
+                                for (item in compElement) {
+                                    if (item is JsonObject) {
+                                        val pkg = item["packageName"]?.jsonPrimitive?.contentOrNull
+                                        val targets = item["targets"]?.jsonArray
+                                        val versions = targets?.mapNotNull {
+                                            (it as? JsonObject)?.get("version")?.jsonPrimitive?.contentOrNull
+                                        } ?: emptyList()
+                                        if (pkg != null) pkgMap[pkg] = versions
+                                    }
+                                }
+                            }
+                            is JsonObject -> {
+                                for ((pkg, vers) in compElement) {
+                                    val list = (vers as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+                                    pkgMap[pkg] = list
+                                }
+                            }
+                            else -> {}
+                        }
+                        parsedComps.add(pkgMap)
+                    }
+                }
+
                 for (elem in bundlesArr) {
                     val obj = elem as? JsonObject ?: continue
                     val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
@@ -351,6 +385,15 @@ object MetaMorpheScraper {
                         // Parse compatible packages and versions
                         val compPkgs = mutableListOf<String>()
                         val compVers = mutableListOf<String>()
+
+                        val cpk = pObj["compatiblePackagesKey"]?.jsonPrimitive?.intOrNull
+                            ?: pObj["compatibilityKey"]?.jsonPrimitive?.intOrNull
+                        if (cpk != null && cpk in parsedComps.indices) {
+                            for ((pkg, vers) in parsedComps[cpk]) {
+                                compPkgs.add(pkg)
+                                compVers.addAll(vers)
+                            }
+                        }
 
                         val compArray = pObj["compatiblePackages"]?.jsonArray ?: pObj["a"]?.jsonArray
                         if (compArray != null) {

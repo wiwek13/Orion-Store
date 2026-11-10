@@ -9,10 +9,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.net.URLEncoder
+import java.util.concurrent.TimeUnit
 
 /**
  * Two-Tier Download Pipeline: Orion Store Primary -> MorpheFlow Base APK Ingestion Cascade.
@@ -21,6 +23,21 @@ import java.net.URLEncoder
 object DownloadOrchestrator {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    /**
+     * Dedicated OkHttpClient for large APK downloads with extended timeouts and followRedirects.
+     * Crucial: callTimeout MUST be 0 (unlimited) so 100MB-500MB APK files do not fail with timeout.
+     */
+    val downloadClient: OkHttpClient by lazy {
+        Net.client.newBuilder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(300, TimeUnit.SECONDS)
+            .writeTimeout(300, TimeUnit.SECONDS)
+            .callTimeout(0, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .build()
+    }
 
     data class ResolvedApk(
         val baseApk: File,
@@ -180,7 +197,7 @@ object DownloadOrchestrator {
             onProgress("Checking GitHub releases for $repoSlug...", 22)
             val apiUrl = "https://api.github.com/repos/$repoSlug/releases/latest"
             val req = Request.Builder().url(apiUrl).header("User-Agent", "OrionStore").build()
-            val resp = Net.client.newCall(req).execute()
+            val resp = downloadClient.newCall(req).execute()
             val body = resp.body?.string() ?: return null
 
             val jsonElement = json.parseToJsonElement(body)
@@ -211,7 +228,7 @@ object DownloadOrchestrator {
             val abi = Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val queryUrl = "https://goopdl.morphe.software/resolve?pkg=$packageName&ver=${URLEncoder.encode(versionName, "UTF-8")}&abi=$abi"
             val req = Request.Builder().url(queryUrl).build()
-            val resp = Net.client.newCall(req).execute()
+            val resp = downloadClient.newCall(req).execute()
             val body = resp.body
             if (resp.isSuccessful && body != null) {
                 val targetFile = File(targetDir, "gplay_base.apk")
@@ -236,7 +253,7 @@ object DownloadOrchestrator {
         return try {
             val queryUrl = "https://uptodown-resolver.morphe.software/resolve?pkg=$packageName&version=${URLEncoder.encode(versionName, "UTF-8")}"
             val req = Request.Builder().url(queryUrl).build()
-            val resp = Net.client.newCall(req).execute()
+            val resp = downloadClient.newCall(req).execute()
             val body = resp.body
             if (resp.isSuccessful && body != null) {
                 val targetFile = File(targetDir, "uptodown_base.apk")
@@ -261,7 +278,7 @@ object DownloadOrchestrator {
         return try {
             val queryUrl = "https://apkcombo-resolver.morphe.software/resolve?pkg=$packageName&ver=${URLEncoder.encode(versionName, "UTF-8")}&abi=arm64-v8a"
             val req = Request.Builder().url(queryUrl).build()
-            val resp = Net.client.newCall(req).execute()
+            val resp = downloadClient.newCall(req).execute()
             val body = resp.body
             if (resp.isSuccessful && body != null) {
                 val targetFile = File(targetDir, "apkcombo_base.apk")
@@ -402,11 +419,12 @@ object DownloadOrchestrator {
         endPct: Int
     ): Boolean {
         return try {
+            android.util.Log.d("DownloadOrchestrator", "downloadFile started: $url")
             val req = Request.Builder()
                 .url(url)
                 .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
                 .build()
-            val resp = Net.client.newCall(req).execute()
+            val resp = downloadClient.newCall(req).execute()
             val body = resp.body
             if (resp.isSuccessful && body != null) {
                 dest.parentFile?.mkdirs()
@@ -414,18 +432,26 @@ object DownloadOrchestrator {
                 if (tempFile.exists()) tempFile.delete()
 
                 val contentLength = body.contentLength()
+                android.util.Log.d("DownloadOrchestrator", "HTTP ${resp.code}, contentLength: $contentLength")
                 var totalBytesRead = 0L
-                val buffer = ByteArray(32768)
+                val buffer = ByteArray(65536)
 
                 body.byteStream().use { input ->
                     FileOutputStream(tempFile).use { output ->
                         var bytesRead: Int
+                        var lastLoggedMb = -1L
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             totalBytesRead += bytesRead
-                            if (contentLength > 0) {
-                                val currentPct = startPct + ((totalBytesRead * (endPct - startPct)) / contentLength).toInt()
-                                onProgress("Downloading APK (${totalBytesRead / (1024 * 1024)} MB)...", currentPct)
+                            val currentMb = totalBytesRead / (1024 * 1024)
+                            if (currentMb != lastLoggedMb) {
+                                lastLoggedMb = currentMb
+                                if (contentLength > 0) {
+                                    val currentPct = startPct + ((totalBytesRead * (endPct - startPct)) / contentLength).toInt()
+                                    onProgress("Downloading APK (${currentMb} / ${contentLength / (1024 * 1024)} MB)...", currentPct.coerceIn(startPct, endPct))
+                                } else {
+                                    onProgress("Downloading APK (${currentMb} MB)...", startPct + 5)
+                                }
                             }
                         }
                         output.flush()
@@ -433,19 +459,26 @@ object DownloadOrchestrator {
                 }
 
                 if (contentLength > 0 && totalBytesRead < contentLength) {
+                    android.util.Log.w("DownloadOrchestrator", "Incomplete download: got $totalBytesRead, expected $contentLength")
                     tempFile.delete()
                     return false
                 }
 
                 if (tempFile.exists() && tempFile.length() > 50_000) {
                     if (dest.exists()) dest.delete()
-                    tempFile.renameTo(dest)
-                    return isApkValid(dest)
+                    val renamed = tempFile.renameTo(dest)
+                    val valid = isApkValid(dest)
+                    android.util.Log.d("DownloadOrchestrator", "Saved $dest (${dest.length()} bytes), isValid: $valid")
+                    return valid
                 }
                 tempFile.delete()
                 false
-            } else false
+            } else {
+                android.util.Log.w("DownloadOrchestrator", "HTTP ${resp.code} for $url")
+                false
+            }
         } catch (e: Exception) {
+            android.util.Log.e("DownloadOrchestrator", "Error downloading $url: ${e.message}", e)
             false
         }
     }

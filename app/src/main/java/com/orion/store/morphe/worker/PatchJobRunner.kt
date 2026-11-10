@@ -243,10 +243,15 @@ object PatchJobRunner {
                     JobStore.updateJob(currentJob)
 
                     try {
+                        val realPkg = try {
+                            ctx.packageManager.getPackageArchiveInfo(apkToInstall.absolutePath, 0)?.packageName
+                        } catch (e: Exception) {
+                            null
+                        }
                         if (splitFiles.isEmpty() && com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
                             com.orion.store.platform.DhizukuBridge.install(ctx, apkToInstall)
                         } else {
-                            val (status, msg) = com.orion.store.platform.SessionInstall.commit(ctx, allApksToInstall, currentJob.params.packageName, ask = true)
+                            val (status, msg) = com.orion.store.platform.SessionInstall.commit(ctx, allApksToInstall, realPkg, ask = true)
                             if (status != android.content.pm.PackageInstaller.STATUS_SUCCESS) {
                                 val isConflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
                                     msg?.contains("signatures do not match", ignoreCase = true) == true ||
