@@ -220,12 +220,20 @@ object PatchJobRunner {
                 )
                 try {
                     signedApk.copyTo(finalApk, overwrite = true)
-                    finalApkFile = finalApk
+                    if (DownloadOrchestrator.isApkValid(finalApk)) {
+                        finalApkFile = finalApk
+                    }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
 
-                val apkToInstall = if (finalApk.exists() && finalApk.length() > 0) finalApk else signedApk
+                val apkToInstall = if (finalApk.exists() && DownloadOrchestrator.isApkValid(finalApk)) finalApk else signedApk
+                if (!DownloadOrchestrator.isApkValid(apkToInstall)) {
+                    val errorMsg = "Patched APK verification failed: output file is corrupted or not a valid APK."
+                    val failedJob = currentJob.failed(errorMsg).withLog("[ERROR] $errorMsg")
+                    JobStore.updateJob(failedJob)
+                    return@launch
+                }
                 val allApksToInstall = listOf(apkToInstall) + signedSplits
 
                 // 6. INSTALLING (if autoInstall = true)

@@ -231,9 +231,9 @@ object MorpheCatalogRepository {
                         }
                     }
 
-                    // If bundle defines targetApps, this patch applies to those target apps!
-                    if (targetApps.isNotEmpty()) {
-                        assignedPkgs.addAll(targetApps)
+                    // Only assign targetApps if the bundle targets exactly one single app and compatibility table is empty
+                    if (assignedPkgs.isEmpty() && targetApps.size == 1) {
+                        assignedPkgs.add(targetApps.first())
                     }
 
                     if (assignedPkgs.isEmpty()) {
@@ -267,7 +267,15 @@ object MorpheCatalogRepository {
                                 compatiblePackages = listOf(pkg),
                                 targetVersions = assignedVers.toList()
                             )
-                            appPatchesMap.getOrPut(pkg) { mutableListOf() }.add(patch)
+                            val patchList = appPatchesMap.getOrPut(pkg) { mutableListOf() }
+                            val existingIdx = patchList.indexOfFirst { it.name.equals(patchName, ignoreCase = true) }
+                            if (existingIdx >= 0) {
+                                val existing = patchList[existingIdx]
+                                val mergedVers = (existing.targetVersions + assignedVers).distinct()
+                                patchList[existingIdx] = existing.copy(targetVersions = mergedVers)
+                            } else {
+                                patchList.add(patch)
+                            }
                         }
                     }
                 }
@@ -334,12 +342,12 @@ object MorpheCatalogRepository {
     }
 
     fun getPatchesForApp(pkg: String): Pair<List<MorpheCatalogPatch>, List<MorpheCatalogPatch>> {
-        synchronized(appPatchesCache) {
-            appPatchesCache[pkg]?.let { return it }
+        val (specifics, universals) = synchronized(appPatchesCache) {
+            appPatchesCache[pkg] ?: (emptyList<MorpheCatalogPatch>() to _universalPatches.value)
         }
-        val app = _apps.value.firstOrNull { it.packageName == pkg }
-        val universals = _universalPatches.value
-        return emptyList<MorpheCatalogPatch>() to universals
+        val dedupSpecifics = specifics.distinctBy { it.name.lowercase() }
+        val dedupUniversals = universals.distinctBy { it.name.lowercase() }
+        return dedupSpecifics to dedupUniversals
     }
 
     fun getApp(pkg: String): MorpheCatalogApp? {
@@ -419,16 +427,16 @@ object MorpheCatalogRepository {
             }
         }
 
-        // Update patches cache
+        // Update patches cache with strict name deduplication
         synchronized(appPatchesCache) {
             for ((pkg, patches) in newAppPatches) {
                 val existing = appPatchesCache[pkg]
                 val existingPatches = existing?.first ?: emptyList()
-                val seenNames = existingPatches.map { "${it.bundleName}:${it.name}" }.toMutableSet()
+                val seenNames = existingPatches.map { it.name.lowercase() }.toMutableSet()
                 val mergedList = existingPatches.toMutableList()
 
                 for (p in patches) {
-                    if (seenNames.add("${p.bundleName}:${p.name}")) {
+                    if (seenNames.add(p.name.lowercase())) {
                         mergedList.add(p)
                     }
                 }

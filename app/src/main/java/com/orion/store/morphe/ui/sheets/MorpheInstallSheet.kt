@@ -3,6 +3,8 @@ package com.orion.store.morphe.ui.sheets
 import androidx.compose.animation.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -40,8 +42,15 @@ fun MorpheInstallSheet(
     val cs = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
 
-    val (specificPatches, universalPatches) = remember(app.packageName) {
+    val (rawSpecificPatches, rawUniversalPatches) = remember(app.packageName) {
         MorpheCatalogRepository.getPatchesForApp(app.packageName)
+    }
+
+    val specificPatches = remember(rawSpecificPatches) {
+        rawSpecificPatches.distinctBy { it.name.lowercase() }
+    }
+    val universalPatches = remember(rawUniversalPatches) {
+        rawUniversalPatches.distinctBy { it.name.lowercase() }
     }
 
     val specificBundles = remember(specificPatches) {
@@ -56,10 +65,18 @@ fun MorpheInstallSheet(
         mutableStateListOf<String>()
     }
 
-    LaunchedEffect(app.packageName) {
+    LaunchedEffect(app.packageName, specificPatches, universalPatches) {
+        val validPatchNames = (specificPatches.map { it.name } + universalPatches.map { it.name }).toSet()
         val saved = vm.s.savedPatchSelections[app.packageName]
         if (!saved.isNullOrEmpty() && selectedPatches.isEmpty()) {
-            selectedPatches.addAll(saved)
+            selectedPatches.addAll(saved.filter { it in validPatchNames })
+        } else if (selectedPatches.isEmpty()) {
+            selectedPatches.addAll(specificPatches.filter { it.isDefault }.map { it.name })
+        }
+        val cleanSelection = selectedPatches.distinct().filter { it in validPatchNames }
+        if (cleanSelection.size != selectedPatches.size) {
+            selectedPatches.clear()
+            selectedPatches.addAll(cleanSelection)
         }
     }
 
@@ -268,7 +285,7 @@ fun MorpheInstallSheet(
 
             // 4-Way Filter Pills from MorpheFlow: All, App-Specific, Universal, Selected
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -334,10 +351,11 @@ fun MorpheInstallSheet(
                     }
 
                     items(displaySpecificBundles.entries.toList(), key = { "spec-${it.key}" }) { (bundleName, bundlePatches) ->
+                        val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.lowercase() } }
                         val isExpanded = expandedBundles.contains(bundleName) || activeFilter == "Selected"
                         BundleAccordionCard(
                             bundleName = bundleName,
-                            patches = bundlePatches,
+                            patches = dedupPatches,
                             selectedPatches = selectedPatches,
                             isExpanded = isExpanded,
                             onToggleExpand = {
@@ -346,11 +364,11 @@ fun MorpheInstallSheet(
                                 vm.haptic(H.LIGHT)
                             },
                             onSelectAllInBundle = {
-                                bundlePatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
+                                dedupPatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
                                 vm.haptic(H.SELECTION)
                             },
                             onClearAllInBundle = {
-                                val names = bundlePatches.map { it.name }.toSet()
+                                val names = dedupPatches.map { it.name }.toSet()
                                 selectedPatches.removeAll(names)
                                 vm.haptic(H.SELECTION)
                             },
@@ -400,10 +418,11 @@ fun MorpheInstallSheet(
 
                     if (showUniversalSection || activeFilter == "Universal" || activeFilter == "Selected") {
                         items(displayUniversalBundles.entries.toList(), key = { "univ-${it.key}" }) { (bundleName, bundlePatches) ->
+                            val dedupPatches = remember(bundlePatches) { bundlePatches.distinctBy { it.name.lowercase() } }
                             val isExpanded = expandedBundles.contains("univ-$bundleName") || activeFilter == "Selected"
                             BundleAccordionCard(
                                 bundleName = bundleName,
-                                patches = bundlePatches,
+                                patches = dedupPatches,
                                 selectedPatches = selectedPatches,
                                 isExpanded = isExpanded,
                                 onToggleExpand = {
@@ -412,11 +431,11 @@ fun MorpheInstallSheet(
                                     vm.haptic(H.LIGHT)
                                 },
                                 onSelectAllInBundle = {
-                                    bundlePatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
+                                    dedupPatches.forEach { p -> if (!selectedPatches.contains(p.name)) selectedPatches.add(p.name) }
                                     vm.haptic(H.SELECTION)
                                 },
                                 onClearAllInBundle = {
-                                    val names = bundlePatches.map { it.name }.toSet()
+                                    val names = dedupPatches.map { it.name }.toSet()
                                     selectedPatches.removeAll(names)
                                     vm.haptic(H.SELECTION)
                                 },

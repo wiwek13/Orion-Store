@@ -99,8 +99,8 @@ class MorpheEngineImpl : PatchEngine {
     override suspend fun signApk(inputApk: File, signedApk: File, keyAlias: String): Boolean {
         signedApk.parentFile?.mkdirs()
         val success = com.orion.store.morphe.store.KeyStoreManager.signApkFile(inputApk, signedApk, keyAlias)
-        if (!success && inputApk.exists()) {
-            inputApk.copyTo(signedApk, overwrite = true)
+        if (!success) {
+            throw IllegalStateException("Failed to sign APK: ${inputApk.name} with key '$keyAlias'. Verify input APK is a valid zip archive.")
         }
         return true
     }

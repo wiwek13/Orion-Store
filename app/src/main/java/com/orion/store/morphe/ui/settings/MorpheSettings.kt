@@ -438,23 +438,25 @@ fun MorpheSettingsPage(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Column(Modifier.weight(1f)) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                        ) {
                                             Text(
                                                 repo.name,
+                                                modifier = Modifier.weight(1f, fill = false),
                                                 style = MaterialTheme.typography.titleSmall,
                                                 fontWeight = FontWeight.Bold,
                                                 maxLines = 1,
                                                 overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                             )
                                             if (repo.isDefault) {
-                                                Spacer(Modifier.width(6.dp))
                                                 Badge(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer) {
-                                                    Text("Official")
+                                                    Text("Official", maxLines = 1, softWrap = false)
                                                 }
                                             } else if (repo.description.contains("MétaMorphe", true)) {
-                                                Spacer(Modifier.width(6.dp))
                                                 Badge(containerColor = cs.secondaryContainer, contentColor = cs.onSecondaryContainer) {
-                                                    Text("MétaMorphe")
+                                                    Text("MétaMorphe", maxLines = 1, softWrap = false)
                                                 }
                                             }
                                         }

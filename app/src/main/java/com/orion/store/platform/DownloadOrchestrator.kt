@@ -42,10 +42,15 @@ object DownloadOrchestrator {
         val installedPkgInfo = runCatching { pm.getPackageInfo(packageName, 0) }.getOrNull()
         if (installedPkgInfo != null) {
             val installedVer = installedPkgInfo.versionName ?: ""
-            val isMatch = requestedVersion.isBlank() || requestedVersion.equals("Latest", ignoreCase = true) || requestedVersion == installedVer
+            val cleanReq = requestedVersion.trim().removePrefix("v").lowercase()
+            val cleanInst = installedVer.trim().removePrefix("v").lowercase()
+            val isMatch = requestedVersion.isBlank() ||
+                cleanReq == "recommended" ||
+                cleanReq == "latest" ||
+                cleanReq == cleanInst
             val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
             if (isMatch && appInfo != null && File(appInfo.sourceDir).exists()) {
-                onProgress("Extracting installed base APK from device...", 15)
+                onProgress("Extracting installed base APK from device (v$installedVer)...", 15)
                 val base = File(targetDir, "base_extracted.apk")
                 File(appInfo.sourceDir).copyTo(base, overwrite = true)
                 val splits = mutableListOf<File>()
@@ -57,51 +62,76 @@ object DownloadOrchestrator {
                         splits.add(targetSplit)
                     }
                 }
-                return@withContext ResolvedApk(base, splits, "Device Extraction", installedVer)
+                if (isApkValid(base)) {
+                    return@withContext ResolvedApk(base, splits, "Device Extraction", installedVer)
+                }
             }
         }
 
         // Tier 1: Orion Store Native Downloader
         onProgress("Checking Orion Store repository...", 10)
         val orionResult = resolveFromOrionStore(packageName, requestedVersion, targetDir, onProgress)
-        if (orionResult != null) {
+        if (orionResult != null && isApkValid(orionResult.baseApk)) {
             return@withContext orionResult
         }
 
         // Tier 2: MorpheFlow Base APK Cascade
-        // Fallback 1: Google Play (goopdl / GPlay API)
-        onProgress("Resolving from Google Play (goopdl)...", 20)
-        val gplayResult = resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress)
-        if (gplayResult != null) {
-            return@withContext gplayResult
-        }
-
-        // Fallback 2: Uptodown Resolver
-        onProgress("Resolving from Uptodown repository...", 35)
-        val uptodownResult = resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress)
-        if (uptodownResult != null) {
-            return@withContext uptodownResult
-        }
-
-        // Fallback 3: APKCombo Resolver
-        onProgress("Resolving from APKCombo repository...", 50)
-        val apkComboResult = resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress)
-        if (apkComboResult != null) {
-            return@withContext apkComboResult
-        }
-
-        // Fallback 4: APKPure Resolver
-        onProgress("Resolving from APKPure repository...", 65)
+        // Fallback 1: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
+        onProgress("Resolving from APKPure repository...", 20)
         val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
-        if (apkPureResult != null) {
+        if (apkPureResult != null && isApkValid(apkPureResult.baseApk)) {
             return@withContext apkPureResult
         }
 
-        // Fallback 5: Local Downloads search
-        onProgress("Checking local Downloads directory...", 80)
+        // Fallback 2: Google Play (goopdl / GPlay API)
+        onProgress("Resolving from Google Play (goopdl)...", 40)
+        val gplayResult = resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress)
+        if (gplayResult != null && isApkValid(gplayResult.baseApk)) {
+            return@withContext gplayResult
+        }
+
+        // Fallback 3: Uptodown Resolver
+        onProgress("Resolving from Uptodown repository...", 55)
+        val uptodownResult = resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress)
+        if (uptodownResult != null && isApkValid(uptodownResult.baseApk)) {
+            return@withContext uptodownResult
+        }
+
+        // Fallback 4: APKCombo Resolver
+        onProgress("Resolving from APKCombo repository...", 70)
+        val apkComboResult = resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress)
+        if (apkComboResult != null && isApkValid(apkComboResult.baseApk)) {
+            return@withContext apkComboResult
+        }
+
+        // Fallback 5: Local Downloads search (Orion Downloads & /sdcard/Download)
+        onProgress("Checking local Downloads directory...", 85)
         val localResult = resolveFromLocalDownloads(context, packageName, appName, targetDir)
-        if (localResult != null) {
+        if (localResult != null && isApkValid(localResult.baseApk)) {
             return@withContext localResult
+        }
+
+        // Fallback 6: If app is installed on device at any version, use it rather than failing
+        if (installedPkgInfo != null) {
+            val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
+            if (appInfo != null && File(appInfo.sourceDir).exists()) {
+                val installedVer = installedPkgInfo.versionName ?: ""
+                onProgress("Using installed version (v$installedVer)...", 90)
+                val base = File(targetDir, "base_extracted.apk")
+                File(appInfo.sourceDir).copyTo(base, overwrite = true)
+                val splits = mutableListOf<File>()
+                appInfo.splitSourceDirs?.forEachIndexed { idx, sPath ->
+                    val sf = File(sPath)
+                    if (sf.exists() && sf.length() > 0) {
+                        val targetSplit = File(targetDir, "split_${idx}.apk")
+                        sf.copyTo(targetSplit, overwrite = true)
+                        splits.add(targetSplit)
+                    }
+                }
+                if (isApkValid(base)) {
+                    return@withContext ResolvedApk(base, splits, "Device Extraction (Installed v$installedVer)", installedVer)
+                }
+            }
         }
 
         null
@@ -207,19 +237,22 @@ object DownloadOrchestrator {
         onProgress: (String, Int) -> Unit
     ): ResolvedApk? {
         return try {
-            val queryUrl = "https://apkpure-resolver.morphe.software/resolve?pkg=$packageName&ver=${URLEncoder.encode(versionName, "UTF-8")}"
-            val req = Request.Builder().url(queryUrl).build()
-            val resp = Net.client.newCall(req).execute()
-            val body = resp.body
-            if (resp.isSuccessful && body != null) {
-                val targetFile = File(targetDir, "apkpure_base.apk")
-                body.byteStream().use { input ->
-                    FileOutputStream(targetFile).use { output -> input.copyTo(output) }
-                }
-                if (targetFile.exists() && targetFile.length() > 500_000) {
-                    normalizeApkBundle(targetFile, targetDir, "APKPure", versionName)
-                } else null
-            } else null
+            val targetFile = File(targetDir, "apkpure_base.apk")
+            val targetXapk = File(targetDir, "apkpure_bundle.xapk")
+
+            // 1. Try direct APK endpoint from APKPure CDN
+            val apkUrl = "https://d.apkpure.net/b/APK/$packageName?version=latest"
+            if (downloadFile(apkUrl, targetFile, onProgress, 20, 35) && isApkValid(targetFile)) {
+                return normalizeApkBundle(targetFile, targetDir, "APKPure", versionName)
+            }
+
+            // 2. Try direct XAPK bundle endpoint if APK not available
+            val xapkUrl = "https://d.apkpure.net/b/XAPK/$packageName?version=latest"
+            if (downloadFile(xapkUrl, targetXapk, onProgress, 20, 35) && isApkValid(targetXapk)) {
+                return normalizeApkBundle(targetXapk, targetDir, "APKPure (XAPK)", versionName)
+            }
+
+            null
         } catch (e: Exception) {
             null
         }
@@ -232,22 +265,56 @@ object DownloadOrchestrator {
         targetDir: File
     ): ResolvedApk? {
         return try {
-            val downloads = Downloads.dir()
-            val candidate = downloads.listFiles()?.firstOrNull { file ->
-                val ext = file.extension.lowercase()
-                val name = file.name.lowercase()
-                (ext in setOf("apk", "xapk", "apkm", "apks")) && (
-                    name.contains(packageName.lowercase()) ||
-                    name.contains(appName.lowercase().replace(" ", ""))
-                )
+            val searchDirs = listOfNotNull(
+                Downloads.dir(),
+                android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            )
+
+            for (dir in searchDirs) {
+                if (!dir.exists()) continue
+                val candidate = dir.listFiles()?.firstOrNull { file ->
+                    val ext = file.extension.lowercase()
+                    val name = file.name.lowercase()
+                    (ext in setOf("apk", "xapk", "apkm", "apks")) &&
+                    !name.startsWith("patched_") &&
+                    !name.contains("_patched") &&
+                    (
+                        name.contains(packageName.lowercase()) ||
+                        name.contains(appName.lowercase().replace(" ", ""))
+                    ) &&
+                    isApkValid(file)
+                }
+
+                if (candidate != null && candidate.exists()) {
+                    val dest = File(targetDir, candidate.name)
+                    candidate.copyTo(dest, overwrite = true)
+                    if (isApkValid(dest)) {
+                        return normalizeApkBundle(dest, targetDir, "Local Downloads (${dir.name})", "Local")
+                    }
+                }
             }
-            if (candidate != null && candidate.exists() && candidate.length() > 0) {
-                val dest = File(targetDir, candidate.name)
-                candidate.copyTo(dest, overwrite = true)
-                normalizeApkBundle(dest, targetDir, "Local Downloads", "Local")
-            } else null
+            null
         } catch (e: Exception) {
             null
+        }
+    }
+
+    /**
+     * Verifies that a file is a valid, uncorrupted Android APK or Split Bundle with EOCD and manifest.
+     */
+    fun isApkValid(file: File): Boolean {
+        if (!file.exists() || file.length() < 50_000) return false
+        val ext = file.extension.lowercase()
+        return try {
+            java.util.zip.ZipFile(file).use { zip ->
+                if (ext in setOf("xapk", "apkm", "apks")) {
+                    zip.entries().asSequence().any { it.name.endsWith(".apk", ignoreCase = true) }
+                } else {
+                    zip.getEntry("AndroidManifest.xml") != null
+                }
+            }
+        } catch (e: Exception) {
+            false
         }
     }
 
@@ -288,29 +355,48 @@ object DownloadOrchestrator {
         endPct: Int
     ): Boolean {
         return try {
-            val req = Request.Builder().url(url).build()
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                .build()
             val resp = Net.client.newCall(req).execute()
             val body = resp.body
             if (resp.isSuccessful && body != null) {
                 dest.parentFile?.mkdirs()
+                val tempFile = File(dest.parentFile, "${dest.name}.part")
+                if (tempFile.exists()) tempFile.delete()
+
                 val contentLength = body.contentLength()
                 var totalBytesRead = 0L
-                val buffer = ByteArray(8192)
+                val buffer = ByteArray(32768)
 
                 body.byteStream().use { input ->
-                    FileOutputStream(dest).use { output ->
+                    FileOutputStream(tempFile).use { output ->
                         var bytesRead: Int
                         while (input.read(buffer).also { bytesRead = it } != -1) {
                             output.write(buffer, 0, bytesRead)
                             totalBytesRead += bytesRead
                             if (contentLength > 0) {
                                 val currentPct = startPct + ((totalBytesRead * (endPct - startPct)) / contentLength).toInt()
-                                onProgress("Downloading APK (${totalBytesRead / 1024} KB)...", currentPct)
+                                onProgress("Downloading APK (${totalBytesRead / (1024 * 1024)} MB)...", currentPct)
                             }
                         }
+                        output.flush()
                     }
                 }
-                dest.exists() && dest.length() > 0
+
+                if (contentLength > 0 && totalBytesRead < contentLength) {
+                    tempFile.delete()
+                    return false
+                }
+
+                if (tempFile.exists() && tempFile.length() > 50_000) {
+                    if (dest.exists()) dest.delete()
+                    tempFile.renameTo(dest)
+                    return isApkValid(dest)
+                }
+                tempFile.delete()
+                false
             } else false
         } catch (e: Exception) {
             false
