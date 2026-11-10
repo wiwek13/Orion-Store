@@ -111,21 +111,32 @@ object MorpheCatalogRepository {
         }
 
         _isSyncing.value = true
+        var synced = false
         try {
             val body = Net.text(CATALOG_URL, c = Net.browser)
             if (body.isNotBlank() && body.startsWith("{")) {
                 file.writeText(body)
                 parseCatalogJson(body)
                 _lastSynced.value = System.currentTimeMillis()
-                _isSyncing.value = false
-                return@withContext true
+                synced = true
+            }
+
+            // Scrape & merge MétaMorphe (https://metamorphe.vercel.app/#sources)
+            try {
+                MetaMorpheScraper.syncSourcesToRepoStore()
+                val metaBundles = MetaMorpheScraper.scrapeRegistryBundles()
+                if (metaBundles.isNotEmpty()) {
+                    mergeMetaMorpheRegistry(metaBundles)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         } catch (e: Exception) {
             e.printStackTrace()
         } finally {
             _isSyncing.value = false
         }
-        return@withContext false
+        return@withContext synced
     }
 
     private fun parseCatalogJson(rawJson: String) {
@@ -329,5 +340,28 @@ object MorpheCatalogRepository {
 
     fun getApp(pkg: String): MorpheCatalogApp? {
         return _apps.value.firstOrNull { it.packageName == pkg }
+    }
+
+    private fun mergeMetaMorpheRegistry(metaBundles: List<MetaMorpheRegistryBundle>) {
+        val currentApps = _apps.value.toMutableList()
+        val appIndexMap = currentApps.mapIndexed { idx, app -> app.packageName to idx }.toMap()
+        val removed = com.orion.store.ui.Store.settings.value.morpheRemovedRepoUrls
+
+        for (b in metaBundles) {
+            if (b.sourceUrl in removed || b.id in removed) continue
+            for (pkg in b.packages) {
+                val idx = appIndexMap[pkg]
+                if (idx != null) {
+                    val app = currentApps[idx]
+                    val updatedBundles = if (!app.bundleNames.contains(b.id)) app.bundleNames + b.id else app.bundleNames
+                    currentApps[idx] = app.copy(
+                        patchCount = maxOf(app.patchCount, b.patchCount),
+                        bundleCount = updatedBundles.size,
+                        bundleNames = updatedBundles
+                    )
+                }
+            }
+        }
+        _apps.value = currentApps
     }
 }

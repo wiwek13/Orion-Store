@@ -203,6 +203,12 @@ object MorpheRepoStore {
         _repos.update { it + repo }
     }
 
+    suspend fun syncFromMetaMorpheSources(): Int {
+        val added = MetaMorpheScraper.syncSourcesToRepoStore()
+        recalculateUpdates()
+        return added
+    }
+
     fun updateRepo(id: String, name: String, url: String) {
         _repos.update { list ->
             list.map {

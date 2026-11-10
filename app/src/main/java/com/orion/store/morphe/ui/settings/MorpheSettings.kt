@@ -20,6 +20,7 @@ import com.orion.store.data.Settings
 import com.orion.store.ui.H
 import com.orion.store.ui.MainViewModel
 import com.orion.store.ui.Sym
+import kotlinx.coroutines.launch
 
 /**
  * Full Morphe Settings page integrated into Orion's settings hub.
@@ -42,6 +43,7 @@ fun MorpheSettingsPage(
     var keyInfo by remember { mutableStateOf(com.orion.store.morphe.store.KeyStoreManager.getActiveKeyInfo()) }
     var showExportCert by remember { mutableStateOf(false) }
     val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+    val scope = rememberCoroutineScope()
 
     Column(
         Modifier.fillMaxWidth(),
@@ -332,7 +334,41 @@ fun MorpheSettingsPage(
                         style = MaterialTheme.typography.bodySmall,
                         color = cs.onSurfaceVariant
                     )
-                    Spacer(Modifier.height(12.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        var syncingMM by remember { mutableStateOf(false) }
+                        FilledTonalButton(
+                            onClick = {
+                                if (syncingMM) return@FilledTonalButton
+                                syncingMM = true
+                                scope.launch {
+                                    val added = com.orion.store.morphe.store.MorpheRepoStore.syncFromMetaMorpheSources()
+                                    syncingMM = false
+                                    vm.haptic(H.SUCCESS)
+                                    vm.snackbar.showSnackbar(
+                                        message = "Synced from https://metamorphe.vercel.app/#sources ($added new sources added)",
+                                        withDismissAction = true
+                                    )
+                                }
+                            },
+                            modifier = Modifier.weight(1f).height(36.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shapes = ButtonDefaults.shapes()
+                        ) {
+                            if (syncingMM) {
+                                androidx.compose.material3.CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            } else {
+                                Icon(Sym.Refresh, null, Modifier.size(16.dp))
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            Text("Sync MétaMorphe Sources", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
                     LazyColumn(
                         Modifier.fillMaxWidth().heightIn(max = 380.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -361,6 +397,11 @@ fun MorpheSettingsPage(
                                                 Badge(containerColor = cs.primaryContainer, contentColor = cs.onPrimaryContainer) {
                                                     Text("Official")
                                                 }
+                                            } else if (repo.description.contains("MétaMorphe", true)) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Badge(containerColor = cs.secondaryContainer, contentColor = cs.onSecondaryContainer) {
+                                                    Text("MétaMorphe")
+                                                }
                                             }
                                         }
                                         Text(
@@ -370,6 +411,15 @@ fun MorpheSettingsPage(
                                             maxLines = 1,
                                             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
                                         )
+                                        if (repo.description.isNotBlank()) {
+                                            Text(
+                                                repo.description,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = cs.primary,
+                                                maxLines = 1,
+                                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
+                                            )
+                                        }
                                     }
 
                                     IconButton(
