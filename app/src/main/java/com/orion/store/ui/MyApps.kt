@@ -25,7 +25,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import java.io.File
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,45 +83,6 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                 job.outputApkPath?.let { java.io.File(it) }?.takeIf { it.exists() && it.length() > 0 } != null
         }
     }
-    val failedPatchJobs = remember(patchJobs) {
-        val succeededPkgs = patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED }.map { it.params.packageName }.toSet()
-        patchJobs.filter { (it.stage == com.orion.store.morphe.model.JobStage.FAILED || it.stage == com.orion.store.morphe.model.JobStage.CANCELLED) && it.params.packageName !in succeededPkgs }
-    }
-    var showLogsForJob by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
-    var cloneDialogJob by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var targetJobForProvide by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
-    val retryFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
-        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
-    ) { uri ->
-        val job = targetJobForProvide
-        if (uri != null && job != null) {
-            val name = uri.lastPathSegment?.substringAfterLast("/") ?: "selected.apk"
-            scope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                try {
-                    val dest = java.io.File(context.cacheDir, "provided_${job.params.packageName}_${System.currentTimeMillis()}.apk")
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        java.io.FileOutputStream(dest).use { output -> input.copyTo(output) }
-                    }
-                    if (com.orion.store.platform.DownloadOrchestrator.isApkValid(dest)) {
-                        com.orion.store.platform.DownloadOrchestrator.cacheBaseApk(context, job.params.packageName, "Local", dest)
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                            vm.haptic(H.SUCCESS)
-                            vm.snackbar.showSnackbar("Loaded APK $name. Retrying patch...")
-                            com.orion.store.morphe.store.JobStore.retryJob(job.id, newSourcePath = dest.absolutePath)
-                        }
-                    } else {
-                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                            vm.snackbar.showSnackbar("Selected file is corrupted or not a valid APK.")
-                            vm.haptic(H.ERROR)
-                        }
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-        }
-    }
     val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size + readyPatchJobs.size
     val cs = MaterialTheme.colorScheme
     // Long-press an installed app to start picking, tap more to add them, then uninstall them together
@@ -139,125 +102,6 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                 FilterPills(vm, s.myAppsFilters) { f -> Choice(pageFilter == f, "${f.label} · ${rows.count { it.matches(f) }}", filterIcon(f)) {
                     scope.launch { pager.animateScrollToPage(filters.indexOf(f).coerceAtLeast(0)) }
                 } }
-            }
-        }
-        if (activePatchJobs.isNotEmpty() || readyPatchJobs.isNotEmpty() || failedPatchJobs.isNotEmpty()) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (readyPatchJobs.isNotEmpty()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Ready to Install (${readyPatchJobs.size})",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.primary
-                        )
-                        TextButton(
-                            onClick = {
-                                vm.haptic(H.LIGHT)
-                                readyPatchJobs.forEach { job ->
-                                    com.orion.store.morphe.store.JobStore.removeJob(job.id)
-                                }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
-                            Text("Dismiss All", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-                    readyPatchJobs.forEach { job ->
-                        com.orion.store.morphe.ui.tabs.JobItemCard(
-                            job = job,
-                            vm = vm,
-                            onViewLogs = { showLogsForJob = job },
-                            onCloneRepatch = { cloneDialogJob = job },
-                            onRequestProvideApk = {
-                                targetJobForProvide = job
-                                retryFilePicker.launch(arrayOf(
-                                    "application/vnd.android.package-archive",
-                                    "application/octet-stream",
-                                    "*/*"
-                                ))
-                            }
-                        )
-                    }
-                }
-
-                if (activePatchJobs.isNotEmpty()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Active Patches (${activePatchJobs.size})",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.primary
-                        )
-                    }
-                    activePatchJobs.forEach { job ->
-                        com.orion.store.morphe.ui.tabs.JobItemCard(
-                            job = job,
-                            vm = vm,
-                            onViewLogs = { showLogsForJob = job },
-                            onCloneRepatch = { cloneDialogJob = job },
-                            onRequestProvideApk = {
-                                targetJobForProvide = job
-                                retryFilePicker.launch(arrayOf(
-                                    "application/vnd.android.package-archive",
-                                    "application/octet-stream",
-                                    "*/*"
-                                ))
-                            }
-                        )
-                    }
-                }
-
-                if (failedPatchJobs.isNotEmpty()) {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            "Failed Patches (${failedPatchJobs.size})",
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold,
-                            color = cs.error
-                        )
-                        TextButton(
-                            onClick = {
-                                vm.haptic(H.MEDIUM)
-                                failedPatchJobs.forEach { job ->
-                                    com.orion.store.morphe.store.JobStore.removeJob(job.id)
-                                    com.orion.store.platform.PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
-                                }
-                            },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                        ) {
-                            Text("Clear All", style = MaterialTheme.typography.labelSmall, color = cs.error)
-                        }
-                    }
-                    failedPatchJobs.forEach { job ->
-                        com.orion.store.morphe.ui.tabs.JobItemCard(
-                            job = job,
-                            vm = vm,
-                            onViewLogs = { showLogsForJob = job },
-                            onCloneRepatch = { cloneDialogJob = job },
-                            onRequestProvideApk = {
-                                targetJobForProvide = job
-                                retryFilePicker.launch(arrayOf(
-                                    "application/vnd.android.package-archive",
-                                    "application/octet-stream",
-                                    "*/*"
-                                ))
-                            }
-                        )
-                    }
-                }
             }
         }
         if (picked.isNotEmpty()) Surface(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), shape = RoundedCornerShape(28.dp), color = cs.secondaryContainer, contentColor = cs.onSecondaryContainer, shadowElevation = 2.dp) {
@@ -321,21 +165,6 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                 }
             }
         }
-        showLogsForJob?.let { job ->
-            com.orion.store.morphe.ui.sheets.PatchConsoleLogSheet(
-                vm = vm,
-                job = job,
-                onDismiss = { showLogsForJob = null }
-            )
-        }
-
-        cloneDialogJob?.let { job ->
-            com.orion.store.morphe.ui.tabs.CloneRepatchDialog(
-                job = job,
-                vm = vm,
-                onDismiss = { cloneDialogJob = null }
-            )
-        }
     }
 }
 
@@ -381,11 +210,28 @@ private fun FilterPills(vm: MainViewModel, saved: List<String>, pill: @Composabl
 private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picked: Boolean? = null, onPick: (() -> Unit)? = null) {
     val (icon, c) = tone(r); val cs = MaterialTheme.colorScheme; val compact = LocalS.current.compactMode
     val bg by animateColorAsState(if (picked == true) cs.secondaryContainer else Color.Transparent, label = "pick")
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     val pkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName ?: r.app.id
     val morpheJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsStateWithLifecycle()
     val activeJob = remember(morpheJobs, pkg) {
         morpheJobs.firstOrNull { it.params.packageName == pkg && it.stage.isActive }
+    }
+    val targetJob = remember(morpheJobs, pkg) {
+        morpheJobs.filter { it.params.packageName == pkg }.maxByOrNull { it.createdAt }
+    }
+    val builtApk = remember(targetJob, pkg, r.app.name) {
+        targetJob?.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
+            ?: runCatching {
+                val downloads = com.orion.store.platform.Downloads.dir()
+                val cleanAppName = r.app.name.replace(" ", "_")
+                downloads.listFiles()?.firstOrNull { f ->
+                    f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
+                        (f.name.contains(pkg, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)) &&
+                        f.length() > 0
+                }
+            }.getOrNull()
     }
     var showActiveJobLogSheet by remember { mutableStateOf(false) }
 
@@ -444,6 +290,16 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                     Spacer(Modifier.width(4.dp))
                     Text("Logs")
                 }
+                builtApk != null -> {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        IconButton({ vm.haptic(H.LIGHT); vm.showInFolder(builtApk) }) {
+                            Icon(Sym.FolderOpen, "Show in Folder", Modifier.size(20.dp), tint = cs.primary)
+                        }
+                        Primary("Install Patched") {
+                            if (targetJob != null) vm.installPatchedApk(targetJob) else vm.installFile(r.app, builtApk.absolutePath)
+                        }
+                    }
+                }
                 r.status == "downloading" -> FilledTonalIconButton({ vm.cancelDownload(r.app.id) }, shapes = IconButtonDefaults.shapes()) { Icon(Sym.Close, "Cancel download") }
                 action == "install" -> Primary("Install") { r.savedFile?.let { vm.installFile(r.app, it) } }
                 action == "repatch" -> Primary("Repatch") {
@@ -461,12 +317,64 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                 }
                 !r.isInstalledNow || !r.app.installsHere() -> Icon(Sym.ChevronRight, "Open details", tint = cs.onSurfaceVariant)
             }
-            if (picked == null && r.isInstalledNow && r.app.installsHere() && r.status != "downloading") Box {
+            if (picked == null && (r.isInstalledNow || builtApk != null || targetJob != null) && r.status != "downloading") Box {
                 var menu by remember { mutableStateOf(false) }
                 IconButton({ menu = true; vm.haptic(H.LIGHT) }) { Icon(Sym.MoreVert, "More options for ${r.app.name}") }
                 DropdownMenu(menu, { menu = false }, shape = RoundedCornerShape(20.dp)) {
                     val resolvedPkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName
-                    if (resolvedPkg != null) DropdownMenuItem({ Text("Open") }, { menu = false; runCatching { vm.tracker.launch(resolvedPkg) }.onFailure { vm.error("Could not launch app. It may be restricted.") } },
+
+                    if (builtApk != null) {
+                        DropdownMenuItem(
+                            text = { Text("Show in Folder") },
+                            onClick = {
+                                menu = false
+                                vm.haptic(H.LIGHT)
+                                vm.showInFolder(builtApk)
+                            },
+                            leadingIcon = { Icon(Sym.FolderOpen, null) }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Install Patched APK") },
+                            onClick = {
+                                menu = false
+                                vm.haptic(H.LIGHT)
+                                if (targetJob != null) vm.installPatchedApk(targetJob) else vm.installFile(r.app, builtApk.absolutePath)
+                            },
+                            leadingIcon = { Icon(Sym.FileDownload, null) }
+                        )
+                    }
+
+                    if (targetJob != null) {
+                        DropdownMenuItem(
+                            text = { Text("View Patch Logs") },
+                            onClick = {
+                                menu = false
+                                vm.haptic(H.LIGHT)
+                                showActiveJobLogSheet = true
+                            },
+                            leadingIcon = { Icon(Sym.Terminal, null) }
+                        )
+                    }
+
+                    if (builtApk != null || targetJob != null) {
+                        DropdownMenuItem(
+                            text = { Text("Remove Patched Build", color = cs.error) },
+                            onClick = {
+                                menu = false
+                                vm.haptic(H.LIGHT)
+                                targetJob?.let { com.orion.store.morphe.store.JobStore.deleteJob(it.id) }
+                                builtApk?.delete()
+                                val freed = com.orion.store.platform.PatchStorageCleaner.purgeAppCache(context, pkg)
+                                scope.launch {
+                                    val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+                                    vm.snackbar.showSnackbar("Removed patched build" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+                                }
+                            },
+                            leadingIcon = { Icon(Sym.Delete, null, tint = cs.error) }
+                        )
+                    }
+
+                    if (resolvedPkg != null && r.isInstalledNow) DropdownMenuItem({ Text("Open") }, { menu = false; runCatching { vm.tracker.launch(resolvedPkg) }.onFailure { vm.error("Could not launch app. It may be restricted.") } },
                         leadingIcon = { Icon(Sym.OpenInNew, null) })
                     DropdownMenuItem({ Text("Patch / Repatch") }, {
                         menu = false
@@ -496,7 +404,9 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                         }
                     }, leadingIcon = { Icon(Sym.Lock, null) })
 
-                    DropdownMenuItem({ Text("Uninstall") }, { menu = false; vm.uninstall(r.app) }, leadingIcon = { Icon(Sym.Delete, null) })
+                    if (r.isInstalledNow) {
+                        DropdownMenuItem({ Text("Uninstall") }, { menu = false; vm.uninstall(r.app) }, leadingIcon = { Icon(Sym.Delete, null) })
+                    }
                 }
             }
         }
@@ -541,10 +451,11 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                 LinearWavyProgressIndicator({ p }, Modifier.fillMaxWidth())
             }
         }
-        if (showActiveJobLogSheet && activeJob != null) {
+        val jobForLogs = activeJob ?: targetJob
+        if (showActiveJobLogSheet && jobForLogs != null) {
             com.orion.store.morphe.ui.sheets.PatchConsoleLogSheet(
                 vm = vm,
-                job = activeJob,
+                job = jobForLogs,
                 onDismiss = { showActiveJobLogSheet = false }
             )
         }

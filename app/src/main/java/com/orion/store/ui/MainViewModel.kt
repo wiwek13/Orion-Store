@@ -869,12 +869,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun showInFolder(file: File) {
+    fun showInFolder(file: File? = null) {
         viewModelScope.launch(Dispatchers.Main) {
-            if (!file.exists()) {
-                toast("File not found.")
-                return@launch
-            }
+            val target = file?.takeIf { it.exists() } ?: com.orion.store.platform.Downloads.dir()
             var folderOpened = false
             try {
                 val downloadDirUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload")
@@ -891,12 +888,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (folderOpened) return@launch
 
             try {
-                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "*/*")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (target.exists()) {
+                    val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", target)
+                    val mime = if (target.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else "*/*"
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    ctx.startActivity(Intent.createChooser(intent, "Open with...").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } else {
+                    toast("Download folder could not be located.")
                 }
-                ctx.startActivity(Intent.createChooser(intent, "Open file with...").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) {
                 e.printStackTrace()
                 toast("Could not open file manager: ${e.message}")
@@ -905,14 +907,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun installPatchedApk(job: PatchJob) = viewModelScope.launch(Dispatchers.IO) {
-        val path = job.outputApkPath ?: return@launch
-        val file = java.io.File(path)
-        if (!file.exists() || !DownloadOrchestrator.isApkValid(file)) {
+        val file = (job.outputApkPath?.let { java.io.File(it) })?.takeIf { it.exists() && DownloadOrchestrator.isApkValid(it) }
+            ?: runCatching {
+                val downloads = com.orion.store.platform.Downloads.dir()
+                val pkg = job.params.packageName
+                val cleanAppName = job.params.appName.replace(" ", "_")
+                downloads.listFiles()?.firstOrNull { f ->
+                    f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
+                        (f.name.contains(pkg, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)) &&
+                        DownloadOrchestrator.isApkValid(f)
+                }
+            }.getOrNull()
+
+        if (file == null || !file.exists() || !DownloadOrchestrator.isApkValid(file)) {
             withContext(Dispatchers.Main) {
                 haptic(H.ERROR)
                 error("Patched APK file not found or corrupted.")
             }
             return@launch
+        }
+
+        if (job.outputApkPath != file.absolutePath) {
+            com.orion.store.morphe.store.JobStore.updateJob(job.copy(outputApkPath = file.absolutePath))
         }
 
         withContext(Dispatchers.Main) {

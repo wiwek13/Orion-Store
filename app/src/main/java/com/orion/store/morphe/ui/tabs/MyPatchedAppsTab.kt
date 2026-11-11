@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
@@ -34,10 +35,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import com.orion.store.platform.PatchStorageCleaner
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -58,6 +63,8 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
     val apps by PatchedAppStore.apps.collectAsStateWithLifecycle()
     val attentionCount by PatchedAppStore.attentionCount.collectAsStateWithLifecycle()
     val cs = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
 
     Surface(
         modifier = Modifier
@@ -151,6 +158,7 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                     items(apps, key = { it.packageName }) { app ->
                         PatchedAppCard(
                             app = app,
+                            vm = vm,
                             onRepatch = {
                                 vm.haptic(H.MEDIUM)
                                 vm.navTo(Tab.PATCH_STUDIO)
@@ -158,6 +166,11 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                             onRemove = {
                                 vm.haptic(H.LIGHT)
                                 PatchedAppStore.removeApp(app.packageName)
+                                val freed = PatchStorageCleaner.purgeAppCache(context, app.packageName)
+                                scope.launch {
+                                    val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+                                    vm.snackbar.showSnackbar("Untracked ${app.appName} and cleared cache" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+                                }
                             }
                         )
                     }
@@ -171,10 +184,13 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
 @Composable
 private fun PatchedAppCard(
     app: PatchedApp,
+    vm: MainViewModel,
     onRepatch: () -> Unit,
     onRemove: () -> Unit
 ) {
     val cs = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var expanded by remember { mutableStateOf(false) }
 
     Card(
@@ -291,7 +307,26 @@ private fun PatchedAppCard(
                     Icon(Sym.Delete, "Untrack app", tint = cs.onSurfaceVariant)
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = {
+                            vm.haptic(H.LIGHT)
+                            val cleanAppName = app.appName.replace(" ", "_")
+                            val downloads = com.orion.store.platform.Downloads.dir()
+                            val foundFile = downloads.listFiles()?.firstOrNull { f ->
+                                f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
+                                    (f.name.contains(app.packageName, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true))
+                            }
+                            vm.showInFolder(foundFile ?: downloads)
+                        },
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        shapes = ButtonDefaults.shapes()
+                    ) {
+                        Icon(Sym.FolderOpen, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Show in Folder", style = MaterialTheme.typography.labelSmall)
+                    }
+
                     FilledTonalButton(
                         onClick = onRepatch,
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)

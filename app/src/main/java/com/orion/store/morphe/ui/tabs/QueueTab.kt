@@ -3,6 +3,7 @@ package com.orion.store.morphe.ui.tabs
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -295,8 +296,18 @@ fun JobItemCard(
     val scope = rememberCoroutineScope()
     var menuExpanded by remember { mutableStateOf(false) }
 
-    val builtApk = remember(job.outputApkPath) {
+    val builtApk = remember(job.outputApkPath, job.params.packageName, job.params.appName) {
         job.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
+            ?: runCatching {
+                val downloads = com.orion.store.platform.Downloads.dir()
+                val pkg = job.params.packageName
+                val cleanAppName = job.params.appName.replace(" ", "_")
+                downloads.listFiles()?.firstOrNull { f ->
+                    f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
+                        (f.name.contains(pkg, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)) &&
+                        f.length() > 0
+                }
+            }.getOrNull()
     }
     val isInstalled = remember(job.params.packageName) {
         runCatching { context.packageManager.getPackageInfo(job.params.packageName, 0) }.isSuccess
@@ -370,15 +381,25 @@ fun JobItemCard(
                             expanded = menuExpanded,
                             onDismissRequest = { menuExpanded = false }
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("Show in Folder") },
+                                onClick = {
+                                    menuExpanded = false
+                                    vm.haptic(H.LIGHT)
+                                    vm.showInFolder(builtApk ?: com.orion.store.platform.Downloads.dir())
+                                },
+                                leadingIcon = { Icon(Sym.FolderOpen, null) }
+                            )
+
                             if (builtApk != null) {
                                 DropdownMenuItem(
-                                    text = { Text("Show in Folder") },
+                                    text = { Text("Install Built APK") },
                                     onClick = {
                                         menuExpanded = false
                                         vm.haptic(H.LIGHT)
-                                        vm.showInFolder(builtApk)
+                                        vm.installPatchedApk(job)
                                     },
-                                    leadingIcon = { Icon(Sym.FolderOpen, null) }
+                                    leadingIcon = { Icon(Sym.FileDownload, null) }
                                 )
                             }
 
@@ -415,7 +436,7 @@ fun JobItemCard(
                             }
 
                             DropdownMenuItem(
-                                text = { Text("Remove from Queue", color = cs.error) },
+                                text = { Text("Remove from Queue & Cache", color = cs.error) },
                                 onClick = {
                                     menuExpanded = false
                                     vm.haptic(H.LIGHT)
@@ -423,6 +444,7 @@ fun JobItemCard(
                                         PatchJobRunner.cancel(job.id)
                                     }
                                     JobStore.deleteJob(job.id)
+                                    builtApk?.delete()
                                     val freed = PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
                                     scope.launch {
                                         val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
@@ -430,7 +452,7 @@ fun JobItemCard(
                                     }
                                     onRemoveFromQueue()
                                 },
-                                leadingIcon = { Icon(Sym.Close, null, tint = cs.error) }
+                                leadingIcon = { Icon(Sym.Delete, null, tint = cs.error) }
                             )
                         }
                     }
@@ -467,117 +489,161 @@ fun JobItemCard(
             // Action row
             Row(
                 Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                when {
-                    // 1. Valid built APK available: primary "Install Built APK"
-                    builtApk != null -> {
-                        if (isInstalled && isConflict) {
-                            FilledTonalButton(
-                                onClick = {
-                                    vm.haptic(H.MEDIUM)
-                                    vm.requestUninstall(job.params.packageName)
-                                },
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                shapes = ButtonDefaults.shapes()
-                            ) {
-                                Icon(Sym.Delete, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Uninstall Original", style = MaterialTheme.typography.labelSmall)
-                            }
-                            Spacer(Modifier.width(8.dp))
+                // Direct Remove / Cancel from Queue
+                OutlinedButton(
+                    onClick = {
+                        vm.haptic(H.MEDIUM)
+                        if (job.stage.isActive || job.stage == JobStage.QUEUED) {
+                            PatchJobRunner.cancel(job.id)
                         }
+                        JobStore.deleteJob(job.id)
+                        builtApk?.delete()
+                        val freed = PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
+                        scope.launch {
+                            val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+                            vm.snackbar.showSnackbar("Removed ${job.params.appName} from queue" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+                        }
+                        onRemoveFromQueue()
+                    },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.error),
+                    border = BorderStroke(1.dp, cs.error.copy(alpha = 0.5f)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                    shapes = ButtonDefaults.shapes()
+                ) {
+                    Icon(Sym.Delete, null, Modifier.size(14.dp), tint = cs.error)
+                    Spacer(Modifier.width(4.dp))
+                    Text("Remove", style = MaterialTheme.typography.labelSmall, color = cs.error)
+                }
 
-                        Button(
-                            onClick = {
-                                vm.haptic(H.LIGHT)
-                                vm.installPatchedApk(job)
-                            },
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                            shapes = ButtonDefaults.shapes()
-                        ) {
-                            Icon(Sym.FileDownload, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                if (isInstalled && isConflict) "Install Patched" else "Install Built APK",
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        }
-                    }
-
-                    // 2. Active job: "Cancel" and "Live Logs"
-                    job.stage.isActive || job.stage == JobStage.QUEUED -> {
-                        OutlinedButton(
-                            onClick = {
-                                vm.haptic(H.MEDIUM)
-                                PatchJobRunner.cancel(job.id)
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            shapes = ButtonDefaults.shapes()
-                        ) {
-                            Icon(Sym.Close, null, Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Cancel", style = MaterialTheme.typography.labelSmall)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        FilledTonalButton(
-                            onClick = {
-                                vm.haptic(H.LIGHT)
-                                onViewLogs()
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            shapes = ButtonDefaults.shapes()
-                        ) {
-                            Icon(Sym.Terminal, null, Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Live Logs", style = MaterialTheme.typography.labelSmall)
-                        }
-                    }
-
-                    // 3. Failed job without built APK: "Retry" and "Provide APK to Retry"
-                    job.stage == JobStage.FAILED || job.stage == JobStage.CANCELLED -> {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Direct "Show in Folder" button
+                    if (builtApk != null || job.stage.isTerminal) {
                         OutlinedButton(
                             onClick = {
                                 vm.haptic(H.LIGHT)
-                                onRequestProvideApk()
+                                vm.showInFolder(builtApk ?: com.orion.store.platform.Downloads.dir())
                             },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             shapes = ButtonDefaults.shapes()
                         ) {
-                            Icon(Sym.FileDownload, null, Modifier.size(14.dp))
+                            Icon(Sym.FolderOpen, null, Modifier.size(14.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Provide APK to Retry", style = MaterialTheme.typography.labelSmall)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        FilledTonalButton(
-                            onClick = {
-                                vm.haptic(H.MEDIUM)
-                                JobStore.retryJob(job.id)
-                                PatchJobRunner.runJob(job, context)
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            shapes = ButtonDefaults.shapes()
-                        ) {
-                            Icon(Sym.Refresh, null, Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Retry", style = MaterialTheme.typography.labelSmall)
+                            Text("Show in Folder", style = MaterialTheme.typography.labelSmall)
                         }
                     }
 
-                    // 4. Fallback completed without file
-                    else -> {
-                        FilledTonalButton(
-                            onClick = {
-                                vm.haptic(H.LIGHT)
-                                onViewLogs()
-                            },
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            shapes = ButtonDefaults.shapes()
-                        ) {
-                            Icon(Sym.Terminal, null, Modifier.size(14.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Live Logs", style = MaterialTheme.typography.labelSmall)
+                    when {
+                        // 1. Valid built APK available: primary "Install Built APK"
+                        builtApk != null -> {
+                            if (isInstalled && isConflict) {
+                                FilledTonalButton(
+                                    onClick = {
+                                        vm.haptic(H.MEDIUM)
+                                        vm.requestUninstall(job.params.packageName)
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                    shapes = ButtonDefaults.shapes()
+                                ) {
+                                    Icon(Sym.Delete, null, Modifier.size(16.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Uninstall Original", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+
+                            Button(
+                                onClick = {
+                                    vm.haptic(H.LIGHT)
+                                    vm.installPatchedApk(job)
+                                },
+                                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.FileDownload, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    if (isInstalled && isConflict) "Install Patched" else "Install Built APK",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+
+                        // 2. Active job: "Cancel" and "Live Logs"
+                        job.stage.isActive || job.stage == JobStage.QUEUED -> {
+                            OutlinedButton(
+                                onClick = {
+                                    vm.haptic(H.MEDIUM)
+                                    PatchJobRunner.cancel(job.id)
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.Close, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Cancel", style = MaterialTheme.typography.labelSmall)
+                            }
+                            FilledTonalButton(
+                                onClick = {
+                                    vm.haptic(H.LIGHT)
+                                    onViewLogs()
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.Terminal, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Live Logs", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+
+                        // 3. Failed job without built APK: "Retry" and "Provide APK to Retry"
+                        job.stage == JobStage.FAILED || job.stage == JobStage.CANCELLED -> {
+                            OutlinedButton(
+                                onClick = {
+                                    vm.haptic(H.LIGHT)
+                                    onRequestProvideApk()
+                                },
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.FileDownload, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Provide APK", style = MaterialTheme.typography.labelSmall)
+                            }
+                            FilledTonalButton(
+                                onClick = {
+                                    vm.haptic(H.MEDIUM)
+                                    JobStore.retryJob(job.id)
+                                    PatchJobRunner.runJob(job, context)
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.Refresh, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Retry", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+
+                        // 4. Fallback completed without file
+                        else -> {
+                            FilledTonalButton(
+                                onClick = {
+                                    vm.haptic(H.LIGHT)
+                                    onViewLogs()
+                                },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                shapes = ButtonDefaults.shapes()
+                            ) {
+                                Icon(Sym.Terminal, null, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Live Logs", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                 }

@@ -52,8 +52,13 @@ object JobStore {
                         }?.maxByOrNull { it.lastModified() }
 
                         val publicDownloads = com.orion.store.platform.Downloads.dir()
-                        val foundInDownloads = publicDownloads?.listFiles()?.firstOrNull { f ->
-                            f.name.startsWith("Patched_") && f.name.contains(job.params.packageName, ignoreCase = true) && f.length() > 50_000
+                        val cleanAppName = job.params.appName.replace(" ", "_")
+                        val foundInDownloads = publicDownloads.listFiles()?.firstOrNull { f ->
+                            f.name.startsWith("Patched_", ignoreCase = true) && (
+                                f.name.contains(job.params.packageName, ignoreCase = true) ||
+                                f.name.contains(cleanAppName, ignoreCase = true) ||
+                                f.name.contains(job.params.appName.filter { it.isLetterOrDigit() }, ignoreCase = true)
+                            ) && f.length() > 50_000
                         }
 
                         val target = foundInSession ?: foundInDownloads
