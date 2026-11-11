@@ -69,6 +69,8 @@ class MorpheEngineImpl : PatchEngine {
 
             val pkg = options["packageName"] ?: ""
             val bundleName = options["bundleName"] ?: ""
+            val clonePkg = options["clonePackageName"]?.trim().orEmpty()
+            val deferCloning = options["deferCloning"] == "true"
             val mppCacheDir = File(inputApk.parentFile, "mpp_cache").apply { mkdirs() }
 
             // 1. Resolve .mpp extension bundle if applicable (e.g. HushGram)
@@ -91,6 +93,16 @@ class MorpheEngineImpl : PatchEngine {
             // 3. Inject extensions and write output APK
             onProgress("Writing modified classes.dex files and resources...", 85)
             mergeApkWithExtensions(inputApk, extensionDexes, extensionAssets, outputApk)
+
+            // Direct engine package cloning if requested in options
+            if (!deferCloning && clonePkg.isNotEmpty() && clonePkg != pkg) {
+                onProgress("Cloning package to $clonePkg for side-by-side coexistence...", 92)
+                val tempCloned = File(outputApk.parentFile, "cloned_temp_${System.currentTimeMillis()}.apk")
+                if (ApkCloner.clonePackage(outputApk, tempCloned, pkg, clonePkg)) {
+                    tempCloned.copyTo(outputApk, overwrite = true)
+                    tempCloned.delete()
+                }
+            }
 
             onProgress("Patches applied successfully", 100)
             return@withContext PatchResult.Success(

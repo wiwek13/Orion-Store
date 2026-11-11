@@ -1,6 +1,7 @@
 package com.orion.store.morphe.worker
 
 import android.content.Context
+import com.orion.store.morphe.engine.ApkCloner
 import com.orion.store.morphe.engine.MorpheEngineImpl
 import com.orion.store.morphe.engine.MorphePatch
 import com.orion.store.morphe.engine.PatchEngine
@@ -194,7 +195,8 @@ object PatchJobRunner {
                     selectedPatches = patchesToApply,
                     options = currentJob.params.patchOptions + mapOf(
                         "packageName" to currentJob.params.packageName,
-                        "bundleName" to primaryBundle
+                        "bundleName" to primaryBundle,
+                        "deferCloning" to "true"
                     ),
                     outputApk = outApk
                 ) { stageMsg, pct ->
@@ -213,12 +215,38 @@ object PatchJobRunner {
 
                 if (!isActive) return@launch
 
+                // Package Cloner: Side-by-side app coexistence support
+                val clonePkg = currentJob.params.patchOptions["clonePackageName"]?.trim().orEmpty()
+                val (apkToAlign, effectivePkg) = if (clonePkg.isNotEmpty() && clonePkg != currentJob.params.packageName) {
+                    currentJob = currentJob.withLog("[CLONE] Cloning package ${currentJob.params.packageName} -> $clonePkg for side-by-side coexistence...")
+                    JobStore.updateJob(currentJob)
+
+                    val clonedApk = File(sessionDir, "cloned_output.apk")
+                    val cloned = ApkCloner.clonePackage(
+                        inputApk = outApk,
+                        outputApk = clonedApk,
+                        targetPkg = currentJob.params.packageName,
+                        newPkg = clonePkg
+                    )
+                    if (cloned && clonedApk.exists() && clonedApk.length() > 0) {
+                        currentJob = currentJob.withLog("[CLONE] Successfully rewritten package and provider authorities to $clonePkg")
+                        JobStore.updateJob(currentJob)
+                        clonedApk to clonePkg
+                    } else {
+                        currentJob = currentJob.withLog("[WARN] Package cloning failed; proceeding with original package name ${currentJob.params.packageName}")
+                        JobStore.updateJob(currentJob)
+                        outApk to currentJob.params.packageName
+                    }
+                } else {
+                    outApk to currentJob.params.packageName
+                }
+
                 // 4. ALIGNING
                 currentJob = currentJob.withStage(JobStage.ALIGNING, "Zip-aligning APK (4-byte boundary)...", 75)
                     .withLog("[ALIGN] 4-byte page alignment on classes.dex and uncompressed assets")
                 JobStore.updateJob(currentJob)
                 val alignedApk = File(sessionDir, "aligned_output.apk")
-                engine.zipalign(outApk, alignedApk)
+                engine.zipalign(apkToAlign, alignedApk)
                 delay(150)
 
                 if (!isActive) return@launch
@@ -259,7 +287,7 @@ object PatchJobRunner {
                         // Automatically clean older patched builds for this app, retaining only this latest build
                         PatchStorageCleaner.cleanOlderPatchedApks(
                             appName = currentJob.params.appName,
-                            packageName = currentJob.params.packageName,
+                            packageName = effectivePkg,
                             keepFile = finalOutput
                         )
                     }
@@ -284,7 +312,7 @@ object PatchJobRunner {
                 // 6. INSTALLING (if autoInstall = true)
                 if (currentJob.params.autoInstall) {
                     currentJob = currentJob.withStage(JobStage.INSTALLING, "Installing patched APK...", 95)
-                        .withLog("[INSTALL] Committing package install session for ${currentJob.params.packageName} (${sessionInstallFiles.size} package(s))")
+                        .withLog("[INSTALL] Committing package install session for $effectivePkg (${sessionInstallFiles.size} package(s))")
                     JobStore.updateJob(currentJob)
 
                     try {
@@ -292,7 +320,7 @@ object PatchJobRunner {
                             ctx.packageManager.getPackageArchiveInfo(signedApk.absolutePath, 0)?.packageName
                         } catch (e: Exception) {
                             null
-                        }
+                        } ?: effectivePkg
                         if (signedSplits.isEmpty() && com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
                             com.orion.store.platform.DhizukuBridge.install(ctx, signedApk)
                         } else {
@@ -338,8 +366,8 @@ object PatchJobRunner {
                 val installedVerTag = (resolvedApk?.resolvedVersion ?: currentJob.params.targetVersion).ifEmpty { "1.0.0" }
                 PatchedAppStore.registerApp(
                     PatchedApp(
-                        packageName = currentJob.params.packageName,
-                        appName = currentJob.params.appName,
+                        packageName = effectivePkg,
+                        appName = if (effectivePkg != currentJob.params.packageName) "${currentJob.params.appName} (Cloned)" else currentJob.params.appName,
                         installedVersion = installedVerTag,
                         targetVersion = installedVerTag,
                         patchBundleId = currentJob.params.patchBundleId,
@@ -352,9 +380,9 @@ object PatchJobRunner {
                 // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately
                 com.orion.store.ui.Store.settings.update { s ->
                     s.copy(
-                        installedVersions = s.installedVersions + (currentJob.params.packageName to installedVerTag),
-                        resolvedPackageNames = s.resolvedPackageNames + (currentJob.params.packageName to currentJob.params.packageName),
-                        appManage = s.appManage + (currentJob.params.packageName to true)
+                        installedVersions = s.installedVersions + (effectivePkg to installedVerTag),
+                        resolvedPackageNames = s.resolvedPackageNames + (effectivePkg to currentJob.params.packageName),
+                        appManage = s.appManage + (effectivePkg to true)
                     )
                 }
 
