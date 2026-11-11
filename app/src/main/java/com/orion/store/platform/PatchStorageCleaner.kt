@@ -54,6 +54,59 @@ object PatchStorageCleaner {
     }
 
     /**
+     * Returns total MB consumed by patcher cache:
+     * - context.filesDir/base_apk_cache
+     * - context.filesDir/mpp_cache
+     * - context.cacheDir/patcher_session
+     */
+    fun getPatcherCacheSizeMb(context: Context): Long {
+        val baseCache = File(context.filesDir, "base_apk_cache")
+        val mppCache = File(context.filesDir, "mpp_cache")
+        val sessionCache = File(context.cacheDir, "patcher_session")
+        fun dirSize(dir: File): Long = if (!dir.exists()) 0L else dir.walkTopDown().filter { it.isFile }.map { it.length() }.sum()
+        val totalBytes = dirSize(baseCache) + dirSize(mppCache) + dirSize(sessionCache)
+        return totalBytes / (1024 * 1024)
+    }
+
+    /**
+     * Purges base APK cache and active/temp session folders for [packageName].
+     * Returns total bytes freed.
+     */
+    fun purgeAppCache(context: Context, packageName: String): Long {
+        var freed = 0L
+        fun deleteAndMeasure(dir: File) {
+            if (dir.exists()) {
+                dir.walkTopDown().filter { it.isFile }.forEach { freed += it.length() }
+                dir.deleteRecursively()
+            }
+        }
+        deleteAndMeasure(File(context.filesDir, "base_apk_cache/$packageName"))
+        deleteAndMeasure(File(context.cacheDir, "patcher_session/$packageName"))
+        return freed
+    }
+
+    /**
+     * Deletes all base APK caches, patch bundle (.mpp) caches, and temporary patcher sessions.
+     * Preserves built APKs in Downloads.
+     * Returns total bytes freed.
+     */
+    fun clearPatcherCache(context: Context): Long {
+        var freed = 0L
+        val dirs = listOf(
+            File(context.filesDir, "base_apk_cache"),
+            File(context.filesDir, "mpp_cache"),
+            File(context.cacheDir, "patcher_session")
+        )
+        for (dir in dirs) {
+            if (dir.exists()) {
+                dir.walkTopDown().filter { it.isFile }.forEach { freed += it.length() }
+                dir.deleteRecursively()
+            }
+        }
+        return freed
+    }
+
+    /**
      * Immediate Post-Install / Post-Failure Cleanup.
      * Deletes:
      * - raw downloaded base APKs (*base*.apk, *.xapk, *.apkm, *.apks)

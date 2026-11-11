@@ -80,6 +80,7 @@ import com.orion.store.R
 import com.orion.store.platform.DhizukuBridge
 import com.orion.store.platform.Installer
 import com.orion.store.platform.OrionAi
+import com.orion.store.platform.PatchStorageCleaner
 import com.orion.store.platform.WirelessAdb
 import com.orion.store.platform.ResultHost
 import com.orion.store.morphe.ui.settings.*
@@ -512,6 +513,31 @@ fun SettingsScreen(vm: MainViewModel) {
                         Section("Janitor") {
                             Toggle(Sym.CleaningServices, "Auto-cleanup installer", "Remove APKs after they install", s.deleteApk) { vm.set { it.copy(deleteApk = !it.deleteApk) } }
                             InfoCard("Janitor mode clears installed APK files on next app start.")
+                        }
+                        // Patcher Cache section
+                        val context = ctx
+                        val cs = MaterialTheme.colorScheme
+                        var patcherCacheMb by remember { mutableLongStateOf(PatchStorageCleaner.getPatcherCacheSizeMb(context)) }
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Patcher APK & Bundle Cache", style = MaterialTheme.typography.titleSmall)
+                                Text("$patcherCacheMb MB cached (re-used across builds)", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    vm.haptic(H.MEDIUM)
+                                    val freedBytes = PatchStorageCleaner.clearPatcherCache(context)
+                                    patcherCacheMb = PatchStorageCleaner.getPatcherCacheSizeMb(context)
+                                    vm.toast("Cleared ${freedBytes / (1024 * 1024)} MB of patcher cache")
+                                },
+                                enabled = patcherCacheMb > 0
+                            ) {
+                                Text("Clear Cache")
+                            }
                         }
                     }
                     "visuals" -> {
