@@ -75,10 +75,18 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
     val visible = rows.filter { it.matches(pageFilter) && it.matchesQuery(query) }
     val patchJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsState()
     val activePatchJobs = remember(patchJobs) { patchJobs.filter { it.stage.isActive } }
+    val readyPatchJobs = remember(patchJobs) {
+        patchJobs.filter { job ->
+            job.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED &&
+                job.outputApkPath?.let { java.io.File(it) }?.takeIf { it.exists() && it.length() > 0 } != null
+        }
+    }
     val failedPatchJobs = remember(patchJobs) {
         val succeededPkgs = patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED }.map { it.params.packageName }.toSet()
-        patchJobs.filter { it.stage == com.orion.store.morphe.model.JobStage.FAILED && it.params.packageName !in succeededPkgs }
+        patchJobs.filter { (it.stage == com.orion.store.morphe.model.JobStage.FAILED || it.stage == com.orion.store.morphe.model.JobStage.CANCELLED) && it.params.packageName !in succeededPkgs }
     }
+    var showLogsForJob by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
+    var cloneDialogJob by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
     val context = androidx.compose.ui.platform.LocalContext.current
     var targetJobForProvide by remember { mutableStateOf<com.orion.store.morphe.model.PatchJob?>(null) }
     val retryFilePicker = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -112,7 +120,7 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
             }
         }
     }
-    val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size
+    val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size + readyPatchJobs.size
     val cs = MaterialTheme.colorScheme
     // Long-press an installed app to start picking, tap more to add them, then uninstall them together
     var picked by rememberSaveable { mutableStateOf(emptySet<String>()) }
@@ -133,34 +141,81 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                 } }
             }
         }
-        if (activePatchJobs.isNotEmpty() || failedPatchJobs.isNotEmpty()) {
+        if (activePatchJobs.isNotEmpty() || readyPatchJobs.isNotEmpty() || failedPatchJobs.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                activePatchJobs.forEach { job ->
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = cs.surfaceContainerHigh
+                if (readyPatchJobs.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(Modifier.padding(14.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Sym.Build, null, Modifier.size(18.dp), tint = cs.primary)
-                                Spacer(Modifier.width(8.dp))
-                                Text(job.params.appName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                                Text("${job.progress}%", style = MaterialTheme.typography.labelMedium, color = cs.primary)
-                                IconButton(onClick = { com.orion.store.morphe.store.JobStore.cancelJob(job.id) }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Sym.Close, "Cancel", Modifier.size(16.dp))
+                        Text(
+                            "Ready to Install (${readyPatchJobs.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = cs.primary
+                        )
+                        TextButton(
+                            onClick = {
+                                vm.haptic(H.LIGHT)
+                                readyPatchJobs.forEach { job ->
+                                    com.orion.store.morphe.store.JobStore.removeJob(job.id)
                                 }
-                            }
-                            Spacer(Modifier.height(6.dp))
-                            Text(job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
-                            Spacer(Modifier.height(8.dp))
-                            LinearWavyProgressIndicator(
-                                progress = { job.progress / 100f },
-                                modifier = Modifier.fillMaxWidth()
-                            )
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Dismiss All", style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                    readyPatchJobs.forEach { job ->
+                        com.orion.store.morphe.ui.tabs.JobItemCard(
+                            job = job,
+                            vm = vm,
+                            onViewLogs = { showLogsForJob = job },
+                            onCloneRepatch = { cloneDialogJob = job },
+                            onRequestProvideApk = {
+                                targetJobForProvide = job
+                                retryFilePicker.launch(arrayOf(
+                                    "application/vnd.android.package-archive",
+                                    "application/octet-stream",
+                                    "*/*"
+                                ))
+                            }
+                        )
+                    }
                 }
+
+                if (activePatchJobs.isNotEmpty()) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Active Patches (${activePatchJobs.size})",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = cs.primary
+                        )
+                    }
+                    activePatchJobs.forEach { job ->
+                        com.orion.store.morphe.ui.tabs.JobItemCard(
+                            job = job,
+                            vm = vm,
+                            onViewLogs = { showLogsForJob = job },
+                            onCloneRepatch = { cloneDialogJob = job },
+                            onRequestProvideApk = {
+                                targetJobForProvide = job
+                                retryFilePicker.launch(arrayOf(
+                                    "application/vnd.android.package-archive",
+                                    "application/octet-stream",
+                                    "*/*"
+                                ))
+                            }
+                        )
+                    }
+                }
+
                 if (failedPatchJobs.isNotEmpty()) {
                     Row(
                         Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
@@ -176,104 +231,31 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                         TextButton(
                             onClick = {
                                 vm.haptic(H.MEDIUM)
-                                failedPatchJobs.forEach { com.orion.store.morphe.store.JobStore.removeJob(it.id) }
+                                failedPatchJobs.forEach { job ->
+                                    com.orion.store.morphe.store.JobStore.removeJob(job.id)
+                                    com.orion.store.platform.PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
+                                }
                             },
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                         ) {
                             Text("Clear All", style = MaterialTheme.typography.labelSmall, color = cs.error)
                         }
                     }
-                }
-                failedPatchJobs.forEach { job ->
-                    val builtApk = job.outputApkPath?.let { java.io.File(it) }?.takeIf { it.exists() && it.length() > 50_000 }
-                    val isInstalled = runCatching { context.packageManager.getPackageInfo(job.params.packageName, 0) }.isSuccess
-                    val isConflict = job.failureReason?.contains("conflict", ignoreCase = true) == true ||
-                        job.failureReason?.contains("signature", ignoreCase = true) == true ||
-                        job.failureReason?.contains("incompatible", ignoreCase = true) == true
-
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(16.dp),
-                        color = cs.errorContainer
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Sym.Warning, null, Modifier.size(20.dp), tint = cs.onErrorContainer)
-                            Spacer(Modifier.width(10.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    if (builtApk != null) "${job.params.appName} Build Ready" else "${job.params.appName} Patch Failed",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    color = cs.onErrorContainer
-                                )
-                                Text(job.failureReason ?: job.stageMessage, style = MaterialTheme.typography.bodySmall, color = cs.onErrorContainer)
-
-                                if (builtApk != null) {
-                                    Spacer(Modifier.height(8.dp))
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        if (isInstalled && isConflict) {
-                                            FilledTonalButton(
-                                                onClick = {
-                                                    vm.haptic(H.MEDIUM)
-                                                    vm.requestUninstall(job.params.packageName)
-                                                },
-                                                modifier = Modifier.height(34.dp),
-                                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                                                shapes = ButtonDefaults.shapes()
-                                            ) {
-                                                Icon(Sym.Delete, null, Modifier.size(14.dp))
-                                                Spacer(Modifier.width(4.dp))
-                                                Text("Uninstall Original", style = MaterialTheme.typography.labelSmall)
-                                            }
-                                        }
-
-                                        Button(
-                                            onClick = {
-                                                vm.installPatchedApk(job)
-                                            },
-                                            modifier = Modifier.height(34.dp),
-                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                            shapes = ButtonDefaults.shapes()
-                                        ) {
-                                            Icon(Sym.FileDownload, null, Modifier.size(14.dp))
-                                            Spacer(Modifier.width(4.dp))
-                                            Text(if (isInstalled && isConflict) "Install Patched" else "Install Built APK", style = MaterialTheme.typography.labelSmall)
-                                        }
-                                    }
-                                } else if (job.failureReason?.contains("base APK", ignoreCase = true) == true) {
-                                    Spacer(Modifier.height(8.dp))
-                                    FilledTonalButton(
-                                        onClick = {
-                                            targetJobForProvide = job
-                                            retryFilePicker.launch(arrayOf(
-                                                "application/vnd.android.package-archive",
-                                                "application/octet-stream",
-                                                "*/*"
-                                            ))
-                                        },
-                                        modifier = Modifier.height(34.dp),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                                        shapes = ButtonDefaults.shapes()
-                                    ) {
-                                        Icon(Sym.FileDownload, null, Modifier.size(14.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text("Provide APK to Retry", style = MaterialTheme.typography.labelSmall)
-                                    }
-                                }
+                    failedPatchJobs.forEach { job ->
+                        com.orion.store.morphe.ui.tabs.JobItemCard(
+                            job = job,
+                            vm = vm,
+                            onViewLogs = { showLogsForJob = job },
+                            onCloneRepatch = { cloneDialogJob = job },
+                            onRequestProvideApk = {
+                                targetJobForProvide = job
+                                retryFilePicker.launch(arrayOf(
+                                    "application/vnd.android.package-archive",
+                                    "application/octet-stream",
+                                    "*/*"
+                                ))
                             }
-                            IconButton(onClick = {
-                                vm.haptic(H.LIGHT)
-                                com.orion.store.morphe.store.JobStore.removeJob(job.id)
-                            }) {
-                                Icon(Sym.Close, "Dismiss", tint = cs.onErrorContainer)
-                            }
-                        }
+                        )
                     }
                 }
             }
@@ -338,6 +320,21 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                     }
                 }
             }
+        }
+        showLogsForJob?.let { job ->
+            com.orion.store.morphe.ui.sheets.PatchConsoleLogSheet(
+                vm = vm,
+                job = job,
+                onDismiss = { showLogsForJob = null }
+            )
+        }
+
+        cloneDialogJob?.let { job ->
+            com.orion.store.morphe.ui.tabs.CloneRepatchDialog(
+                job = job,
+                vm = vm,
+                onDismiss = { cloneDialogJob = null }
+            )
         }
     }
 }
