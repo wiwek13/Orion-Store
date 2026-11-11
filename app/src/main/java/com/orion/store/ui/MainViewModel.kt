@@ -19,6 +19,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.core.content.FileProvider
 import androidx.core.net.toUri
 import androidx.core.app.NotificationChannelCompat
 import androidx.core.app.NotificationCompat
@@ -867,6 +868,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun showInFolder(file: File) {
+        viewModelScope.launch(Dispatchers.Main) {
+            if (!file.exists()) {
+                toast("File not found.")
+                return@launch
+            }
+            try {
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "*/*")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(Intent.createChooser(intent, "Open file with...").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            } catch (e: Exception) {
+                e.printStackTrace()
+                toast("Could not open file manager: ${e.message}")
+            }
+        }
+    }
+
     fun installPatchedApk(job: PatchJob) = viewModelScope.launch(Dispatchers.IO) {
         val path = job.outputApkPath ?: return@launch
         val file = java.io.File(path)
@@ -883,7 +904,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             toast("Starting installation for ${job.params.appName}...")
         }
 
-        val parts = com.orion.store.platform.Bundles.parts(ctx, file).ifEmpty { listOf(file) }
+        val isBundle = file.extension.equals("apks", ignoreCase = true) ||
+            file.extension.equals("xapk", ignoreCase = true) ||
+            file.extension.equals("apkm", ignoreCase = true)
+        val parts = com.orion.store.platform.Bundles.parts(ctx, file).ifEmpty {
+            if (isBundle) emptyList() else listOf(file)
+        }
+        if (parts.isEmpty()) {
+            withContext(Dispatchers.Main) {
+                haptic(H.ERROR)
+                error("Could not unpack split bundle container: ${file.name}")
+            }
+            return@launch
+        }
         val baseApk = parts.first()
         val realPkg = try {
             ctx.packageManager.getPackageArchiveInfo(baseApk.absolutePath, 0)?.packageName

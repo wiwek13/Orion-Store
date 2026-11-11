@@ -16,8 +16,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 /** One PackageInstaller session for a single APK or a split set (XAPK, APKM, APKS). */
 object SessionInstall {
-    private val sessions = ConcurrentHashMap<Int, CompletableDeferred<Pair<Int, String?>>>()
-    private val confirm = ConcurrentHashMap.newKeySet<Int>()
+    internal val sessions = ConcurrentHashMap<Int, CompletableDeferred<Pair<Int, String?>>>()
+    internal val confirm = ConcurrentHashMap.newKeySet<Int>()
 
     suspend fun commit(ctx: Context, files: List<File>, pkg: String?, ask: Boolean): Pair<Int, String?> = withContext(Dispatchers.IO) {
         val pi = ctx.packageManager.packageInstaller
@@ -59,15 +59,21 @@ object SessionInstall {
             }
             if (next != null) {
                 next.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                val started = runCatching { ctx.startActivity(next) }.isSuccess
-                if (started) {
+                val launchResult = runCatching { ctx.startActivity(next) }
+                if (launchResult.isSuccess) {
                     // System install dialog popped up on screen! Keep session active and wait for user's action.
                     return true
                 }
+                val err = launchResult.exceptionOrNull()
+                runCatching { ctx.packageManager.packageInstaller.abandonSession(id) }
+                confirm -= id
+                val errMsg = "Failed to launch package install confirmation dialog: ${err?.message ?: "unknown error"}"
+                sessions[id]?.complete(PackageInstaller.STATUS_FAILURE to errMsg)
+                return true
             }
             runCatching { ctx.packageManager.packageInstaller.abandonSession(id) }
             confirm -= id
-            sessions[id]?.complete(PackageInstaller.STATUS_FAILURE to "Android requested user confirmation, but the prompt could not be displayed.")
+            sessions[id]?.complete(PackageInstaller.STATUS_FAILURE to "Android requested user confirmation, but no confirmation intent was provided.")
             return true
         }
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
