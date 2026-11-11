@@ -139,6 +139,11 @@ object DownloadOrchestrator {
         )
     }
 
+    fun cacheResolvedApk(context: Context, packageName: String, version: String, resolved: ResolvedApk) {
+        val updated = if (resolved.resolvedVersion.isBlank()) resolved.copy(resolvedVersion = version) else resolved
+        cacheResolvedApk(context, packageName, updated)
+    }
+
     fun cacheResolvedApk(context: Context, packageName: String, resolved: ResolvedApk) {
         try {
             if (!isApkValid(resolved.baseApk, requireCleanBase = true)) return
@@ -262,47 +267,60 @@ object DownloadOrchestrator {
             return@withContext githubResult
         }
 
-        // Fallback 2: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
-        onProgress("Resolving from APKPure repository...", 20)
-        val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(apkPureResult)) {
-            cacheResolvedApk(context, packageName, apkPureResult!!)
-            return@withContext apkPureResult
-        }
-
-        // Fallback 3: Aptoide Public API (generalised for 99.9% of apps worldwide)
-        onProgress("Resolving from Aptoide repository...", 28)
-        val aptoideResult = resolveFromAptoide(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(aptoideResult)) {
-            cacheResolvedApk(context, packageName, aptoideResult!!)
-            return@withContext aptoideResult
-        }
-
-        // Fallback 4: Google Play (goopdl / GPlay API)
-        onProgress("Resolving from Google Play (goopdl)...", 40)
+        // Fallback 2: Google Play (goopdl / GPlay API)
+        onProgress("Resolving from Google Play (goopdl)...", 25)
         val gplayResult = resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress)
         if (isCompletePackage(gplayResult)) {
             cacheResolvedApk(context, packageName, gplayResult!!)
             return@withContext gplayResult
         }
 
-        // Fallback 4: Uptodown Resolver
-        onProgress("Resolving from Uptodown repository...", 55)
+        // Tier 2b: APKMirror Resolver
+        val apkmirrorResult = ApkMirrorResolver.resolveAndDownload(
+            packageName = packageName,
+            appName = appName,
+            requestedVersion = requestedVersion,
+            targetDir = targetDir,
+            onProgress = onProgress
+        )
+        if (apkmirrorResult != null && isCompletePackage(apkmirrorResult)) {
+            cacheResolvedApk(context, packageName, apkmirrorResult.resolvedVersion, apkmirrorResult)
+            return@withContext apkmirrorResult
+        }
+
+        // Fallback 3: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
+        onProgress("Resolving from APKPure repository...", 35)
+        val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
+        if (isCompletePackage(apkPureResult)) {
+            cacheResolvedApk(context, packageName, apkPureResult!!)
+            return@withContext apkPureResult
+        }
+
+        // Fallback 4: Aptoide Public API (generalised for 99.9% of apps worldwide)
+        onProgress("Resolving from Aptoide repository...", 45)
+        val aptoideResult = resolveFromAptoide(packageName, requestedVersion, targetDir, onProgress)
+        if (isCompletePackage(aptoideResult)) {
+            cacheResolvedApk(context, packageName, aptoideResult!!)
+            return@withContext aptoideResult
+        }
+
+        // Fallback 5: Uptodown Resolver
+        onProgress("Resolving from Uptodown repository...", 60)
         val uptodownResult = resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress)
         if (isCompletePackage(uptodownResult)) {
             cacheResolvedApk(context, packageName, uptodownResult!!)
             return@withContext uptodownResult
         }
 
-        // Fallback 5: APKCombo Resolver
-        onProgress("Resolving from APKCombo repository...", 70)
+        // Fallback 6: APKCombo Resolver
+        onProgress("Resolving from APKCombo repository...", 75)
         val apkComboResult = resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress)
         if (isCompletePackage(apkComboResult)) {
             cacheResolvedApk(context, packageName, apkComboResult!!)
             return@withContext apkComboResult
         }
 
-        // Fallback 6: If app is installed on device at any version, use it rather than failing
+        // Fallback 7: If app is installed on device at any version, use it rather than failing
         if (installedPkgInfo != null) {
             val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
             if (appInfo != null && File(appInfo.sourceDir).exists()) {
