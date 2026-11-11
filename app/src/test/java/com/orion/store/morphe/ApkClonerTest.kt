@@ -3,6 +3,7 @@ package com.orion.store.morphe
 import com.orion.store.morphe.engine.ApkCloner
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -186,6 +187,142 @@ class ApkClonerTest {
         val success = ApkCloner.clonePackage(nonExistent, tempOut, "com.target", "com.cloned")
         assertFalse(success)
 
+        tempOut.delete()
+    }
+
+    @Test
+    fun testBinaryAxmlPackageCloningWithAapt2Verification() {
+        // Load real binary AndroidManifest.xml from Boost APK or test resources
+        val manifestBytes: ByteArray = run {
+            val boostApk = File("build/test_temp/boost/github_com.rubenmayayo.reddit.apk")
+            if (boostApk.exists()) {
+                ZipFile(boostApk).use { zf ->
+                    zf.getInputStream(zf.getEntry("AndroidManifest.xml")).use { it.readBytes() }
+                }
+            } else {
+                val resStream = javaClass.classLoader?.getResourceAsStream("axml/boost_manifest.bin")
+                if (resStream != null) {
+                    resStream.use { it.readBytes() }
+                } else {
+                    File("src/test/resources/axml/boost_manifest.bin").takeIf { it.exists() }?.readBytes()
+                        ?: File("app/src/test/resources/axml/boost_manifest.bin").readBytes()
+                }
+            }
+        }
+
+        assertTrue("Manifest bytes must not be empty", manifestBytes.isNotEmpty())
+
+        val tempIn = File.createTempFile("test_boost_in", ".apk")
+        val tempOut = File.createTempFile("test_boost_cloned", ".apk")
+
+        ZipOutputStream(FileOutputStream(tempIn)).use { zos ->
+            zos.putNextEntry(ZipEntry("AndroidManifest.xml"))
+            zos.write(manifestBytes)
+            zos.closeEntry()
+
+            zos.putNextEntry(ZipEntry("classes.dex"))
+            zos.write(ByteArray(128))
+            zos.closeEntry()
+        }
+
+        // Clone to different length: com.rubenmayayo.reddit (22 chars) -> com.rubenmayayo.reddit.morphe (29 chars)
+        val success = ApkCloner.clonePackage(
+            inputApk = tempIn,
+            outputApk = tempOut,
+            targetPkg = "com.rubenmayayo.reddit",
+            newPkg = "com.rubenmayayo.reddit.morphe"
+        )
+        assertTrue("clonePackage must succeed on binary AXML APK", success)
+        assertTrue("Output APK must exist and have content", tempOut.exists() && tempOut.length() > 0)
+
+        // Verify with aapt2 dump xmltree --file AndroidManifest.xml <clonedApk>
+        val aapt2Path = listOf(
+            "/opt/homebrew/share/android-commandlinetools/build-tools/35.0.0/aapt2",
+            "/usr/local/share/android-commandlinetools/build-tools/35.0.0/aapt2"
+        ).firstOrNull { File(it).exists() && File(it).canExecute() }
+            ?: System.getenv("ANDROID_HOME")?.let { File(it, "build-tools/35.0.0/aapt2").takeIf { f -> f.exists() }?.absolutePath }
+            ?: System.getenv("ANDROID_SDK_ROOT")?.let { File(it, "build-tools/35.0.0/aapt2").takeIf { f -> f.exists() }?.absolutePath }
+
+        if (aapt2Path != null) {
+            val process = ProcessBuilder(
+                aapt2Path,
+                "dump", "xmltree",
+                "--file", "AndroidManifest.xml",
+                tempOut.absolutePath
+            ).redirectErrorStream(true).start()
+
+            val output = process.inputStream.bufferedReader().readText()
+            val exitCode = process.waitFor()
+
+            println("[AAPT2 VERIFICATION OUTPUT]\n" + output.take(500))
+            assertEquals("aapt2 must exit with code 0 without parse errors", 0, exitCode)
+            assertTrue(
+                "aapt2 output must declare package=\"com.rubenmayayo.reddit.morphe\"",
+                output.contains("package=\"com.rubenmayayo.reddit.morphe\"")
+            )
+            assertFalse(
+                "aapt2 output must not retain old package=\"com.rubenmayayo.reddit\"",
+                output.contains("package=\"com.rubenmayayo.reddit\"")
+            )
+            assertTrue(
+                "aapt2 output must have rewritten provider authorities",
+                output.contains("com.rubenmayayo.reddit.morphe.provider")
+            )
+        } else {
+            println("[WARN] aapt2 binary not found on standard paths, falling back to binary parser checks.")
+            val clonedBytes = ZipFile(tempOut).use { zf ->
+                zf.getInputStream(zf.getEntry("AndroidManifest.xml")).use { it.readBytes() }
+            }
+            val buf = java.nio.ByteBuffer.wrap(clonedBytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val rootType = buf.getShort(0).toInt() and 0xFFFF
+            assertEquals("Root chunk type must remain 0x0003", 0x0003, rootType)
+            assertEquals("Root header size must remain 8", 8, buf.getShort(2).toInt() and 0xFFFF)
+        }
+
+        tempIn.delete()
+        tempOut.delete()
+    }
+
+    @Test
+    fun testBinaryAxmlPackageCloningContraction() {
+        val manifestBytes = File("app/src/test/resources/axml/boost_manifest.bin").takeIf { it.exists() }?.readBytes()
+            ?: File("src/test/resources/axml/boost_manifest.bin").readBytes()
+
+        val tempIn = File.createTempFile("test_contract_in", ".apk")
+        val tempOut = File.createTempFile("test_contract_out", ".apk")
+
+        ZipOutputStream(FileOutputStream(tempIn)).use { zos ->
+            zos.putNextEntry(ZipEntry("AndroidManifest.xml"))
+            zos.write(manifestBytes)
+            zos.closeEntry()
+        }
+
+        // Contract length: com.rubenmayayo.reddit (22 chars) -> com.r.r (7 chars)
+        val success = ApkCloner.clonePackage(
+            inputApk = tempIn,
+            outputApk = tempOut,
+            targetPkg = "com.rubenmayayo.reddit",
+            newPkg = "com.r.r"
+        )
+        assertTrue(success)
+
+        val aapt2Path = "/opt/homebrew/share/android-commandlinetools/build-tools/35.0.0/aapt2"
+        if (File(aapt2Path).exists()) {
+            val process = ProcessBuilder(
+                aapt2Path,
+                "dump", "xmltree",
+                "--file", "AndroidManifest.xml",
+                tempOut.absolutePath
+            ).redirectErrorStream(true).start()
+
+            val output = process.inputStream.bufferedReader().readText()
+            val exitCode = process.waitFor()
+
+            assertEquals("aapt2 contraction test must exit with code 0", 0, exitCode)
+            assertTrue("Must contain package=\"com.r.r\"", output.contains("package=\"com.r.r\""))
+        }
+
+        tempIn.delete()
         tempOut.delete()
     }
 }

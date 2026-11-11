@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.DocumentsContract
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
@@ -874,6 +875,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 toast("File not found.")
                 return@launch
             }
+            var folderOpened = false
+            try {
+                val downloadDirUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload")
+                val folderIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(downloadDirUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(folderIntent)
+                folderOpened = true
+            } catch (e: Exception) {
+                folderOpened = false
+            }
+
+            if (folderOpened) return@launch
+
             try {
                 val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", file)
                 val intent = Intent(Intent.ACTION_VIEW).apply {

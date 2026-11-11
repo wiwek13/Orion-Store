@@ -530,9 +530,14 @@ fun SettingsScreen(vm: MainViewModel) {
                             OutlinedButton(
                                 onClick = {
                                     vm.haptic(H.MEDIUM)
-                                    val freedBytes = PatchStorageCleaner.clearPatcherCache(context)
-                                    patcherCacheMb = PatchStorageCleaner.getPatcherCacheSizeMb(context)
-                                    vm.toast("Cleared ${freedBytes / (1024 * 1024)} MB of patcher cache")
+                                    scope.launch(Dispatchers.IO) {
+                                        val freedBytes = PatchStorageCleaner.clearPatcherCache(context)
+                                        val newMb = PatchStorageCleaner.getPatcherCacheSizeMb(context)
+                                        withContext(Dispatchers.Main) {
+                                            patcherCacheMb = newMb
+                                            vm.toast("Cleared ${freedBytes / (1024 * 1024)} MB of patcher cache")
+                                        }
+                                    }
                                 },
                                 enabled = patcherCacheMb > 0
                             ) {

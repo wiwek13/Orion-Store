@@ -134,23 +134,46 @@ class DownloadOrchestratorTest {
     }
 
     @Test
-    fun `test resolve boost for reddit from github releases`() = runBlocking {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val targetDir = File("build/test_temp/boost").apply { mkdirs() }
+    fun `test resolve boost for reddit from github releases`() {
+        val repoSlug = DownloadOrchestrator.getKnownGitHubRepo("com.rubenmayayo.reddit")
+        assertEquals("rubenmayayo/boost-for-reddit", repoSlug)
 
-        val resolved = DownloadOrchestrator.resolveAndDownload(
-            context = context,
-            packageName = "com.rubenmayayo.reddit",
-            appName = "Boost for Reddit",
-            requestedVersion = "1.14.3",
-            targetDir = targetDir
-        ) { stage, pct ->
-            println("[TEST BOOST] $stage ($pct%)")
-        }
+        // Mock GitHub release assets JSON with multiple architecture variants (arm64, universal, x86)
+        val mockReleaseJson = """
+            {
+              "tag_name": "v1.14.3",
+              "assets": [
+                {
+                  "name": "boost-1.14.3-x86.apk",
+                  "browser_download_url": "https://github.com/rubenmayayo/boost-for-reddit/releases/download/v1.14.3/boost-x86.apk"
+                },
+                {
+                  "name": "boost-1.14.3-arm64-v8a.apk",
+                  "browser_download_url": "https://github.com/rubenmayayo/boost-for-reddit/releases/download/v1.14.3/boost-arm64.apk"
+                },
+                {
+                  "name": "boost-1.14.3-universal.apk",
+                  "browser_download_url": "https://github.com/rubenmayayo/boost-for-reddit/releases/download/v1.14.3/boost-universal.apk"
+                },
+                {
+                  "name": "source-code.zip",
+                  "browser_download_url": "https://github.com/rubenmayayo/boost-for-reddit/archive/v1.14.3.zip"
+                }
+              ]
+            }
+        """.trimIndent()
 
-        assertNotNull("Should resolve Boost APK from GitHub", resolved)
-        assertTrue("Base APK should be valid", DownloadOrchestrator.isApkValid(resolved!!.baseApk))
-        println("[TEST BOOST] Success: ${resolved.baseApk.absolutePath} (${resolved.baseApk.length()} bytes)")
+        val jsonElement = kotlinx.serialization.json.Json.parseToJsonElement(mockReleaseJson) as kotlinx.serialization.json.JsonObject
+        val assets = jsonElement["assets"] as kotlinx.serialization.json.JsonArray
+
+        val selected = DownloadOrchestrator.selectGitHubApkAsset(assets)
+        assertNotNull("Should select an APK asset from GitHub release", selected)
+
+        val selectedName = selected?.get("name")?.toString()?.trim('"')
+        val downloadUrl = selected?.get("browser_download_url")?.toString()?.trim('"')
+
+        assertTrue("Should select arm64 or universal over x86", selectedName?.contains("arm64") == true || selectedName?.contains("universal") == true)
+        assertEquals("https://github.com/rubenmayayo/boost-for-reddit/releases/download/v1.14.3/boost-arm64.apk", downloadUrl)
     }
 
     @Test

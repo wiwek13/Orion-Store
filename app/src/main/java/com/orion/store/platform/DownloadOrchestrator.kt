@@ -378,6 +378,40 @@ object DownloadOrchestrator {
         return null
     }
 
+    internal fun getKnownGitHubRepo(packageName: String): String? {
+        val knownRepos = mapOf(
+            "com.brave.browser" to "brave/brave-browser",
+            "com.rubenmayayo.reddit" to "rubenmayayo/boost-for-reddit",
+            "ch.protonvpn.android" to "ProtonVPN/android-app",
+            "org.videolan.vlc" to "videolan/vlc-android",
+            "org.schabi.newpipe" to "TeamNewPipe/NewPipe",
+            "org.telegram.messenger" to "DrKLO/Telegram",
+            "org.mozilla.firefox" to "mozilla-mobile/firefox-android",
+            "org.thunderdog.challegram" to "TGX-Android/Telegram-X",
+            "com.duckduckgo.mobile.android" to "duckduckgo/Android",
+            "io.github.muntashirakon.AppManager" to "MuntashirAkon/AppManager",
+            "com.aurora.store" to "whyorean/AuroraStore"
+        )
+
+        return knownRepos[packageName] ?: run {
+            val app = Store.data.value.apps.find { it.packageName == packageName || it.id == packageName }
+            val rUrl = app?.repoUrl
+            if (rUrl != null && rUrl.contains("github.com/")) {
+                rUrl.substringAfter("github.com/").trimEnd('/').removeSuffix(".git").takeIf { it.contains("/") }
+            } else null
+        }
+    }
+
+    internal fun selectGitHubApkAsset(assets: JsonArray): JsonObject? {
+        return (assets.firstOrNull { elem ->
+            val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
+            name.endsWith(".apk") && (name.contains("arm64") || name.contains("monoarm64") || name.contains("universal"))
+        } ?: assets.firstOrNull { elem ->
+            val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
+            name.endsWith(".apk") && !name.contains("x86")
+        }) as? JsonObject
+    }
+
     private suspend fun resolveFromGitHubReleases(
         packageName: String,
         versionName: String,
@@ -385,27 +419,7 @@ object DownloadOrchestrator {
         onProgress: (String, Int) -> Unit
     ): ResolvedApk? {
         return try {
-            val knownRepos = mapOf(
-                "com.brave.browser" to "brave/brave-browser",
-                "com.rubenmayayo.reddit" to "rubenmayayo/boost-for-reddit",
-                "ch.protonvpn.android" to "ProtonVPN/android-app",
-                "org.videolan.vlc" to "videolan/vlc-android",
-                "org.schabi.newpipe" to "TeamNewPipe/NewPipe",
-                "org.telegram.messenger" to "DrKLO/Telegram",
-                "org.mozilla.firefox" to "mozilla-mobile/firefox-android",
-                "org.thunderdog.challegram" to "TGX-Android/Telegram-X",
-                "com.duckduckgo.mobile.android" to "duckduckgo/Android",
-                "io.github.muntashirakon.AppManager" to "MuntashirAkon/AppManager",
-                "com.aurora.store" to "whyorean/AuroraStore"
-            )
-
-            val repoSlug = knownRepos[packageName] ?: run {
-                val app = Store.data.value.apps.find { it.packageName == packageName || it.id == packageName }
-                val rUrl = app?.repoUrl
-                if (rUrl != null && rUrl.contains("github.com/")) {
-                    rUrl.substringAfter("github.com/").trimEnd('/').removeSuffix(".git").takeIf { it.contains("/") }
-                } else null
-            } ?: return null
+            val repoSlug = getKnownGitHubRepo(packageName) ?: return null
 
             onProgress("Checking GitHub releases for $repoSlug...", 22)
             val cleanVer = versionName.trim().removePrefix("v")
@@ -429,13 +443,7 @@ object DownloadOrchestrator {
 
             val jsonElement = json.parseToJsonElement(body)
             val assets = (jsonElement as? JsonObject)?.get("assets") as? JsonArray ?: return null
-            val apkAsset = (assets.firstOrNull { elem ->
-                val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
-                name.endsWith(".apk") && (name.contains("arm64") || name.contains("monoarm64") || name.contains("universal"))
-            } ?: assets.firstOrNull { elem ->
-                val name = (elem as? JsonObject)?.get("name")?.toString()?.trim('"')?.lowercase() ?: ""
-                name.endsWith(".apk") && !name.contains("x86")
-            }) as? JsonObject ?: return null
+            val apkAsset = selectGitHubApkAsset(assets) ?: return null
 
             val dlUrl = apkAsset["browser_download_url"]?.toString()?.trim('"') ?: return null
             val targetFile = File(targetDir, "github_${packageName}.apk")
