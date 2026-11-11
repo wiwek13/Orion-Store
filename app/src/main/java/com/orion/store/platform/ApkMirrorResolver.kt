@@ -1,3 +1,5 @@
+@file:Suppress("UNNECESSARY_SAFE_CALL", "USELESS_ELVIS")
+
 package com.orion.store.platform
 
 import com.orion.store.data.Net
@@ -9,6 +11,12 @@ import java.io.FileOutputStream
 import java.net.URLEncoder
 
 object ApkMirrorResolver {
+
+    private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Mobile Safari/537.36"
+
+    private val releaseRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-release/)"""")
+    private val downloadPageRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-android-apk-download/)"""")
+    private val directDownloadRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-android-apk-download/download/[^"]*)"""")
 
     data class ApkMirrorVariant(
         val id: String,
@@ -41,48 +49,59 @@ object ApkMirrorResolver {
             val searchUrl = buildSearchUrl(packageName)
             val searchReq = Request.Builder()
                 .url(searchUrl)
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36")
+                .header("User-Agent", USER_AGENT)
                 .build()
 
-            val resp = Net.client.newCall(searchReq).execute()
-            if (!resp.isSuccessful) return@withContext null
-            val html = resp.body.string()
-            if (html.isEmpty()) return@withContext null
+            val releaseUrl = Net.client.newCall(searchReq).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val html = resp.body?.string().orEmpty()
+                if (html.isEmpty()) return@withContext null
 
-            // Find release links in APKMirror results
-            val releaseRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-release/)"""")
-            val releaseMatch = releaseRegex.find(html) ?: return@withContext null
-            val releasePath = releaseMatch.groupValues[1]
-            val releaseUrl = "https://www.apkmirror.com$releasePath"
+                val releaseMatch = releaseRegex.find(html) ?: return@withContext null
+                "https://www.apkmirror.com" + releaseMatch.groupValues[1]
+            }
 
             onProgress("Fetching release variants from APKMirror...", 15)
-            val releaseReq = Request.Builder().url(releaseUrl).header("User-Agent", "Mozilla/5.0").build()
-            val releaseResp = Net.client.newCall(releaseReq).execute()
-            if (!releaseResp.isSuccessful) return@withContext null
-            val releaseHtml = releaseResp.body.string()
+            val releaseReq = Request.Builder()
+                .url(releaseUrl)
+                .header("User-Agent", USER_AGENT)
+                .build()
+            val downloadPageUrl = Net.client.newCall(releaseReq).execute().use { releaseResp ->
+                if (!releaseResp.isSuccessful) return@withContext null
+                val releaseHtml = releaseResp.body?.string().orEmpty()
 
-            // Find download page link
-            val downloadPageRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-android-apk-download/)"""")
-            val downloadPageMatch = downloadPageRegex.find(releaseHtml) ?: return@withContext null
-            val downloadPageUrl = "https://www.apkmirror.com" + downloadPageMatch.groupValues[1]
+                val downloadPageMatch = downloadPageRegex.find(releaseHtml) ?: return@withContext null
+                "https://www.apkmirror.com" + downloadPageMatch.groupValues[1]
+            }
 
-            val downloadBtnReq = Request.Builder().url(downloadPageUrl).header("User-Agent", "Mozilla/5.0").build()
-            val downloadBtnResp = Net.client.newCall(downloadBtnReq).execute()
-            if (!downloadBtnResp.isSuccessful) return@withContext null
-            val downloadBtnHtml = downloadBtnResp.body.string()
+            val downloadBtnReq = Request.Builder()
+                .url(downloadPageUrl)
+                .header("User-Agent", USER_AGENT)
+                .build()
+            val finalPageUrl = Net.client.newCall(downloadBtnReq).execute().use { downloadBtnResp ->
+                if (!downloadBtnResp.isSuccessful) return@withContext null
+                val downloadBtnHtml = downloadBtnResp.body?.string().orEmpty()
 
-            val directDownloadRegex = Regex("""href="(/apk/[^/]+/[^/]+/[^"]+-android-apk-download/download/[^"]*)"""")
-            val directMatch = directDownloadRegex.find(downloadBtnHtml) ?: return@withContext null
-            val finalPageUrl = "https://www.apkmirror.com" + directMatch.groupValues[1]
+                val directMatch = directDownloadRegex.find(downloadBtnHtml) ?: return@withContext null
+                "https://www.apkmirror.com" + directMatch.groupValues[1]
+            }
 
             onProgress("Streaming APK from APKMirror...", 18)
-            val streamReq = Request.Builder().url(finalPageUrl).header("User-Agent", "Mozilla/5.0").build()
-            val streamResp = DownloadOrchestrator.downloadClient.newCall(streamReq).execute()
-            if (!streamResp.isSuccessful) return@withContext null
-
-            val body = streamResp.body
+            val streamReq = Request.Builder()
+                .url(finalPageUrl)
+                .header("User-Agent", USER_AGENT)
+                .build()
             val destFile = File(targetDir, "apkmirror_download.apk")
-            FileOutputStream(destFile).use { out -> body.byteStream().copyTo(out) }
+            val streamResp = DownloadOrchestrator.downloadClient.newCall(streamReq).execute()
+            streamResp.use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val body = resp.body ?: return@withContext null
+                FileOutputStream(destFile).use { out ->
+                    body.byteStream().use { input ->
+                        input.copyTo(out)
+                    }
+                }
+            }
 
             if (destFile.exists() && destFile.length() > 50_000) {
                 return@withContext DownloadOrchestrator.normalizeApkBundle(destFile, targetDir, "APKMirror", requestedVersion)
