@@ -240,3 +240,4 @@ In both `QueueTab.kt` and `MyApps.kt`:
    - Test "Clone & Repatch": clone package to `com.instagram.android.morphe`, patch, and verify side-by-side coexistence with stock Instagram.
    - Test "Remove from Queue": verify job is removed and `base_apk_cache/` + `patcher_session/` for that package are wiped.
    - Test Settings "Clear Patcher Cache": verify cached base APKs are cleared and freed storage metric updates.
+

@@ -152,4 +152,61 @@ class DownloadOrchestratorTest {
         assertTrue("Base APK should be valid", DownloadOrchestrator.isApkValid(resolved!!.baseApk))
         println("[TEST BOOST] Success: ${resolved.baseApk.absolutePath} (${resolved.baseApk.length()} bytes)")
     }
+
+    @Test
+    fun `test cacheResolvedApk preserves split APKs across cache reuse`(): Unit = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pkg = "com.test.splitcacheapp"
+        val srcDir = File("build/test_temp/split_src").apply { mkdirs() }
+        val baseApk = File(srcDir, "base.apk").also { createValidDummyApk(it) }
+        val split1 = File(srcDir, "config.arm64_v8a.apk").also { createValidDummyApk(it) }
+        val split2 = File(srcDir, "config.xxxhdpi.apk").also { createValidDummyApk(it) }
+
+        DownloadOrchestrator.cacheResolvedApk(
+            context = context,
+            packageName = pkg,
+            resolved = DownloadOrchestrator.ResolvedApk(
+                baseApk = baseApk,
+                splits = listOf(split1, split2),
+                sourceProvider = "APKPure (XAPK)",
+                resolvedVersion = "2.0.0"
+            )
+        )
+
+        val sessionDir = File("build/test_temp/split_session").apply { mkdirs() }
+        val resolved = DownloadOrchestrator.resolveAndDownload(
+            context = context,
+            packageName = pkg,
+            appName = "Split App",
+            requestedVersion = "2.0.0",
+            targetDir = sessionDir
+        ) { _, _ -> }
+
+        assertNotNull("Should resolve cached split bundle", resolved)
+        assertEquals("2.0.0", resolved!!.resolvedVersion)
+        assertEquals("Both split APKs must be preserved in cache", 2, resolved.splits.size)
+        srcDir.deleteRecursively()
+        sessionDir.deleteRecursively()
+    }
+
+    @Test
+    fun `test Bundles choose picks only primary ABI and orders base APK first`() {
+        val picked = com.orion.store.platform.Bundles.choose(
+            names = listOf(
+                "config.armeabi_v7a.apk",
+                "config.xxxhdpi.apk",
+                "config.xxhdpi.apk",
+                "com.instagram.android.apk",
+                "config.arm64_v8a.apk"
+            ),
+            abis = listOf("arm64-v8a", "armeabi-v7a"),
+            densityDpi = 480
+        )
+
+        assertEquals("Base APK must be sorted first", "com.instagram.android.apk", picked.first())
+        assertTrue("Primary arm64-v8a ABI must be selected", picked.contains("config.arm64_v8a.apk"))
+        assertFalse("Secondary armeabi-v7a ABI must NOT be included alongside arm64-v8a", picked.contains("config.armeabi_v7a.apk"))
+        assertTrue("Closest xxhdpi DPI must be selected", picked.contains("config.xxhdpi.apk"))
+        assertFalse("Non-matching xxxhdpi DPI must be excluded", picked.contains("config.xxxhdpi.apk"))
+    }
 }

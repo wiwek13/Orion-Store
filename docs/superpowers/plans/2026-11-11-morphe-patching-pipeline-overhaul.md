@@ -709,3 +709,4 @@ Expected: `Success`.
 4. Verify "Install Built APK" appears in Queue tab upon completion and commits installation cleanly.
 5. Tap 3-dots overflow menu and verify "Show in Folder" opens Samsung My Files to the patched APK.
 6. Test "Remove from Queue": verify job is removed and `base_apk_cache/` + `patcher_session/` for Instagram are purged.
+

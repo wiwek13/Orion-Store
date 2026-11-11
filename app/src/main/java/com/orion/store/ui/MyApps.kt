@@ -189,7 +189,6 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                     val isInstalled = runCatching { context.packageManager.getPackageInfo(job.params.packageName, 0) }.isSuccess
                     val isConflict = job.failureReason?.contains("conflict", ignoreCase = true) == true ||
                         job.failureReason?.contains("signature", ignoreCase = true) == true ||
-                        job.failureReason?.contains("split", ignoreCase = true) == true ||
                         job.failureReason?.contains("incompatible", ignoreCase = true) == true
 
                     Surface(

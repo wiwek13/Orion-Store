@@ -883,53 +883,88 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             toast("Starting installation for ${job.params.appName}...")
         }
 
+        val parts = com.orion.store.platform.Bundles.parts(ctx, file).ifEmpty { listOf(file) }
+        val baseApk = parts.first()
         val realPkg = try {
-            ctx.packageManager.getPackageArchiveInfo(file.absolutePath, 0)?.packageName
+            ctx.packageManager.getPackageArchiveInfo(baseApk.absolutePath, 0)?.packageName
         } catch (e: Exception) {
             job.params.packageName
         } ?: job.params.packageName
 
-        if (DhizukuBridge.available(ctx) && DhizukuBridge.granted(ctx)) {
-            val ok = runCatching { DhizukuBridge.install(ctx, file) }.isSuccess
+        if (parts.size == 1 && DhizukuBridge.available(ctx) && DhizukuBridge.granted(ctx)) {
+            val ok = runCatching { DhizukuBridge.install(ctx, baseApk) }.isSuccess
             withContext(Dispatchers.Main) {
                 if (ok) {
+                    markPatchedJobInstalled(job, realPkg)
                     haptic(H.SUCCESS)
                     toast("Installed ${job.params.appName} via Dhizuku!")
                     JobStore.removeJob(job.id)
                 } else {
                     toast("Dhizuku install did not complete; opening system installer...")
-                    installPatchedViaSession(job, file, realPkg)
+                    installPatchedViaSession(job, file, parts, realPkg)
                 }
             }
         } else {
-            installPatchedViaSession(job, file, realPkg)
+            installPatchedViaSession(job, file, parts, realPkg)
         }
     }
 
-    private suspend fun installPatchedViaSession(job: PatchJob, file: java.io.File, realPkg: String) {
-        val (status, msg) = SessionInstall.commit(ctx, listOf(file), realPkg, ask = true)
+    private suspend fun installPatchedViaSession(
+        job: PatchJob,
+        sourceFile: java.io.File,
+        parts: List<java.io.File>,
+        realPkg: String
+    ) {
+        val (status, msg) = SessionInstall.commit(ctx, parts, realPkg, ask = true)
         withContext(Dispatchers.Main) {
             if (status == android.content.pm.PackageInstaller.STATUS_SUCCESS) {
+                markPatchedJobInstalled(job, realPkg)
                 haptic(H.SUCCESS)
                 toast("Installed ${job.params.appName} successfully!")
                 JobStore.removeJob(job.id)
             } else {
-                val isConflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
-                    msg?.contains("signatures do not match", ignoreCase = true) == true ||
-                    msg?.contains("INCOMPATIBLE", ignoreCase = true) == true ||
-                    msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                val isMissingSplit = msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                val isConflict = !isMissingSplit && (
+                    status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
+                        msg?.contains("signatures do not match", ignoreCase = true) == true ||
+                        msg?.contains("INCOMPATIBLE", ignoreCase = true) == true
+                    )
                 val isAborted = status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED ||
                     status == -1 ||
                     msg?.contains("cancelled", ignoreCase = true) == true ||
                     msg?.contains("aborted", ignoreCase = true) == true
                 val reason = when {
+                    isMissingSplit -> "Split APK missing: ${job.params.appName} requires companion split APKs. Dismiss this job and re-patch to download the full bundle."
                     isConflict -> "Signature or package conflict: An incompatible version of ${job.params.appName} is installed. Please uninstall the original app, then tap 'Install Built APK'."
                     isAborted -> "Installation cancelled. Tap 'Install Built APK' to try again."
                     else -> "Installation failed (status $status): ${msg ?: "Installer error"}. Tap 'Install Built APK' to try again."
                 }
                 haptic(H.ERROR)
-                JobStore.updateJob(job.copy(failureReason = reason, stageMessage = reason, outputApkPath = file.absolutePath))
+                JobStore.updateJob(job.copy(failureReason = reason, stageMessage = reason, outputApkPath = sourceFile.absolutePath))
             }
+        }
+    }
+
+    private fun markPatchedJobInstalled(job: PatchJob, realPkg: String) {
+        val ver = job.params.targetVersion.ifEmpty { "1.0.0" }
+        com.orion.store.morphe.store.PatchedAppStore.registerApp(
+            com.orion.store.morphe.model.PatchedApp(
+                packageName = realPkg,
+                appName = job.params.appName,
+                installedVersion = ver,
+                targetVersion = ver,
+                patchBundleId = job.params.patchBundleId,
+                patchBundleVersion = "1.0.0",
+                appliedPatches = job.params.selectedPatchIds,
+                needsAttention = false
+            )
+        )
+        Store.settings.update { s ->
+            s.copy(
+                installedVersions = s.installedVersions + (realPkg to ver),
+                resolvedPackageNames = s.resolvedPackageNames + (realPkg to realPkg),
+                appManage = s.appManage + (realPkg to true)
+            )
         }
     }
 

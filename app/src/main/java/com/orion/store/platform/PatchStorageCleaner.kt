@@ -123,15 +123,15 @@ object PatchStorageCleaner {
     }
 
     /**
-     * Cleans older cached base APKs for [packageName], retaining only [keepFile].
+     * Cleans older cached base APKs / split bundle dirs for [packageName], retaining only [keepTarget].
      */
-    fun cleanOlderBaseApks(context: Context, packageName: String, keepFile: File) {
+    fun cleanOlderBaseApks(context: Context, packageName: String, keepTarget: File) {
         try {
             val baseCacheDir = File(context.filesDir, "base_apk_cache/$packageName")
             if (!baseCacheDir.exists()) return
-            baseCacheDir.listFiles()?.forEach { file ->
-                if (file.absolutePath != keepFile.absolutePath && file.isFile) {
-                    file.delete()
+            baseCacheDir.listFiles()?.forEach { entry ->
+                if (entry.absolutePath != keepTarget.absolutePath) {
+                    entry.deleteRecursively()
                 }
             }
         } catch (e: Exception) {

@@ -25,7 +25,12 @@ object Bundles {
     /** Which entries of a bundle this device should install. */
     fun choose(names: List<String>, abis: List<String>, densityDpi: Int): List<String> {
         val want = abis.map { it.lowercase().replace('_', '-') }
-        val abiOk = names.filter { n -> abiOf(n).let { it == null || it in want } }
+        val primaryAbi = want.firstOrNull { abi -> names.any { abiOf(it) == abi } }
+        val abiOk = if (primaryAbi != null) {
+            names.filter { n -> abiOf(n).let { it == null || it == primaryAbi } }
+        } else {
+            names.filter { n -> abiOf(n).let { it == null || it in want } }
+        }
         val densities = abiOk.mapNotNull { dpiOf(it) }.filter { it != "nodpi" && it != "anydpi" }.toSet()
         val closest = densities.minByOrNull { d -> kotlin.math.abs((DPI.firstOrNull { it.first == d }?.second ?: densityDpi) - densityDpi) }
         val kept = if (closest == null) abiOk else abiOk.filter { n -> dpiOf(n).let { it == null || it == "nodpi" || it == "anydpi" || it == closest } }
@@ -54,7 +59,14 @@ object Bundles {
         val abis = Build.SUPPORTED_ABIS.toList()
         val dpi = ctx.resources.displayMetrics.densityDpi
         val picked = choose(apks.map { it.name }, abis, dpi).toSet()
-        return apks.filter { it.name in picked }.ifEmpty { apks }.sortedBy { it.name.lowercase().let { n -> if (n == "base.apk") 0 else 1 } }
+        return apks.filter { it.name in picked }.ifEmpty { apks }.sortedBy {
+            val l = it.name.lowercase()
+            when {
+                l == "base.apk" -> 0
+                "split" in l || "config." in l || "config_" in l -> 2
+                else -> 1
+            }
+        }
     }
 
     private fun readableApk(ctx: Context, f: File) = runCatching { ctx.packageManager.getPackageArchiveInfo(f.absolutePath, 0)?.packageName }.getOrNull() != null

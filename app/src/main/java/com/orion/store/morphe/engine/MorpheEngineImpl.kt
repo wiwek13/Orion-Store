@@ -186,16 +186,47 @@ class MorpheEngineImpl : PatchEngine {
             }
 
             ZipOutputStream(FileOutputStream(outputApk)).use { outZip ->
-                // Copy existing entries from inputApk, omitting stale signature files so apksig can sign cleanly
+                val buffer = ByteArray(65536)
+                // Copy existing entries from inputApk, omitting stale signature files so apksig can sign cleanly.
+                // Crucial: resources.arsc, *.so native libs, and originally STORED entries MUST remain ZipEntry.STORED
+                // so Android R+ (API 30+) resources.arsc and extractNativeLibs="false" validation succeeds.
                 for (entry in inZip.entries().asSequence()) {
                     val name = entry.name
-                    if (name.startsWith("META-INF/") && (name.endsWith(".SF") || name.endsWith(".RSA") || name.endsWith(".DSA") || name.endsWith(".EC") || name == "META-INF/MANIFEST.MF")) {
+                    if (name.startsWith("META-INF/") && (name.endsWith(".SF", true) || name.endsWith(".RSA", true) || name.endsWith(".DSA", true) || name.endsWith(".EC", true) || name.equals("META-INF/MANIFEST.MF", true))) {
                         continue
                     }
                     existingEntryNames.add(name)
+
+                    val mustStore = name == "resources.arsc" ||
+                        name.endsWith(".so", ignoreCase = true) ||
+                        entry.method == ZipEntry.STORED
+
                     val newEntry = ZipEntry(name)
+                    if (mustStore) {
+                        newEntry.method = ZipEntry.STORED
+                        if (entry.size >= 0L && entry.crc != -1L) {
+                            newEntry.size = entry.size
+                            newEntry.compressedSize = entry.size
+                            newEntry.crc = entry.crc
+                        } else {
+                            val (computedSize, computedCrc) = computeSizeAndCrc(inZip, entry, buffer)
+                            newEntry.size = computedSize
+                            newEntry.compressedSize = computedSize
+                            newEntry.crc = computedCrc
+                        }
+                    } else {
+                        newEntry.method = ZipEntry.DEFLATED
+                    }
+
                     outZip.putNextEntry(newEntry)
-                    inZip.getInputStream(entry).use { it.copyTo(outZip) }
+                    if (!entry.isDirectory) {
+                        inZip.getInputStream(entry).use { input ->
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                outZip.write(buffer, 0, read)
+                            }
+                        }
+                    }
                     outZip.closeEntry()
                 }
 
@@ -223,12 +254,31 @@ class MorpheEngineImpl : PatchEngine {
         }
     }
 
-    override suspend fun zipalign(inputApk: File, alignedApk: File): Boolean {
-        alignedApk.parentFile?.mkdirs()
-        if (inputApk.exists()) {
-            inputApk.copyTo(alignedApk, overwrite = true)
+    private fun computeSizeAndCrc(zip: ZipFile, entry: ZipEntry, buffer: ByteArray): Pair<Long, Long> {
+        val crc = java.util.zip.CRC32()
+        var total = 0L
+        zip.getInputStream(entry).use { input ->
+            var read: Int
+            while (input.read(buffer).also { read = it } != -1) {
+                crc.update(buffer, 0, read)
+                total += read
+            }
         }
-        return true
+        return total to crc.value
+    }
+
+    override suspend fun zipalign(inputApk: File, alignedApk: File): Boolean = withContext(Dispatchers.IO) {
+        alignedApk.parentFile?.mkdirs()
+        if (!inputApk.exists()) return@withContext false
+        try {
+            // Preserve STORED method on resources.arsc and .so files; KeyStoreManager uses apksig
+            // (with alignmentPreserved=false and libraryPageAlignmentBytes=16384) to apply exact alignment.
+            inputApk.copyTo(alignedApk, overwrite = true)
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
     }
 
     override suspend fun signApk(inputApk: File, signedApk: File, keyAlias: String): Boolean {

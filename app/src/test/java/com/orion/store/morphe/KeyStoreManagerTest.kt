@@ -71,4 +71,59 @@ class KeyStoreManagerTest {
 
         tempDir.deleteRecursively()
     }
+
+    @Test
+    fun `test MorpheEngineImpl preserves STORED on resources arsc and native libraries`(): Unit = kotlinx.coroutines.runBlocking {
+        val tempDir = java.io.File(System.getProperty("java.io.tmpdir", "/tmp"), "morphe_stored_${System.currentTimeMillis()}")
+        tempDir.mkdirs()
+        val inputApk = java.io.File(tempDir, "input.apk")
+        val patchedApk = java.io.File(tempDir, "patched.apk")
+        val alignedApk = java.io.File(tempDir, "aligned.apk")
+        val signedApk = java.io.File(tempDir, "signed.apk")
+
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(inputApk)).use { zos ->
+            zos.putNextEntry(java.util.zip.ZipEntry("AndroidManifest.xml"))
+            zos.write("<manifest/>".toByteArray())
+            zos.closeEntry()
+
+            val arscBytes = "ARSC_DATA_CONTENT".toByteArray()
+            val arscCrc = java.util.zip.CRC32().apply { update(arscBytes) }.value
+            zos.putNextEntry(java.util.zip.ZipEntry("resources.arsc").apply {
+                method = java.util.zip.ZipEntry.STORED
+                size = arscBytes.size.toLong()
+                compressedSize = arscBytes.size.toLong()
+                crc = arscCrc
+            })
+            zos.write(arscBytes)
+            zos.closeEntry()
+
+            zos.putNextEntry(java.util.zip.ZipEntry("lib/arm64-v8a/libtest.so"))
+            zos.write(ByteArray(256) { 0x7F })
+            zos.closeEntry()
+        }
+
+        val engine = com.orion.store.morphe.engine.MorpheEngineImpl()
+        val res = engine.applyPatches(
+            inputApk = inputApk,
+            selectedPatches = emptyList(),
+            options = mapOf("packageName" to "com.test.sample", "bundleName" to "TestBundle"),
+            outputApk = patchedApk
+        ) { _, _ -> }
+
+        assertTrue("Patch apply should succeed", res is com.orion.store.morphe.engine.PatchResult.Success)
+        assertTrue("Zipalign should succeed", engine.zipalign(patchedApk, alignedApk))
+        assertTrue("Signing should succeed", engine.signApk(alignedApk, signedApk, KeyStoreManager.DEFAULT_ALIAS))
+
+        java.util.zip.ZipFile(signedApk).use { zip ->
+            val arscEntry = zip.getEntry("resources.arsc")
+            assertNotNull("resources.arsc must exist", arscEntry)
+            assertEquals("resources.arsc MUST be STORED (0)", java.util.zip.ZipEntry.STORED, arscEntry!!.method)
+
+            val soEntry = zip.getEntry("lib/arm64-v8a/libtest.so")
+            assertNotNull("libtest.so must exist", soEntry)
+            assertEquals("Native .so library MUST be STORED (0)", java.util.zip.ZipEntry.STORED, soEntry!!.method)
+        }
+
+        tempDir.deleteRecursively()
+    }
 }

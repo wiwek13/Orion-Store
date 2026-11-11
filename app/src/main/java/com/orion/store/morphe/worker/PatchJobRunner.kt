@@ -240,74 +240,88 @@ object PatchJobRunner {
 
                 if (!isActive) return@launch
 
-                // Save a permanent copy into Downloads folder if keepPatchedApks is enabled
-                val finalApk = File(
+                // Save a permanent copy into Downloads folder so retries / manual install always have full base + splits
+                val verTag = (resolvedApk?.resolvedVersion ?: currentJob.params.targetVersion).ifEmpty { "1.0" }.replace(" ", "_")
+                val baseSafeName = currentJob.params.appName.replace(" ", "_")
+                val hasSplits = signedSplits.isNotEmpty()
+                val finalOutput = File(
                     com.orion.store.platform.Downloads.dir(),
-                    "Patched_${currentJob.params.appName.replace(" ", "_")}_v${currentJob.params.targetVersion.ifEmpty { "1.0" }}.apk"
+                    if (hasSplits) "Patched_${baseSafeName}_v${verTag}.apks" else "Patched_${baseSafeName}_v${verTag}.apk"
                 )
                 try {
-                    signedApk.copyTo(finalApk, overwrite = true)
-                    if (DownloadOrchestrator.isApkValid(finalApk)) {
-                        finalApkFile = finalApk
-                        // Automatically clean older patched APKs for this app, retaining only this latest build
+                    if (hasSplits) {
+                        packApksBundle(signedApk, signedSplits, finalOutput)
+                    } else {
+                        signedApk.copyTo(finalOutput, overwrite = true)
+                    }
+                    if (DownloadOrchestrator.isApkValid(finalOutput)) {
+                        finalApkFile = finalOutput
+                        // Automatically clean older patched builds for this app, retaining only this latest build
                         PatchStorageCleaner.cleanOlderPatchedApks(
                             appName = currentJob.params.appName,
                             packageName = currentJob.params.packageName,
-                            keepFile = finalApk
+                            keepFile = finalOutput
                         )
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
 
-                val apkToInstall = if (finalApk.exists() && DownloadOrchestrator.isApkValid(finalApk)) finalApk else signedApk
-                if (!DownloadOrchestrator.isApkValid(apkToInstall)) {
+                val sessionInstallFiles = listOf(signedApk) + signedSplits
+                val outputPathForRetry = if (finalOutput.exists() && DownloadOrchestrator.isApkValid(finalOutput)) {
+                    finalOutput
+                } else {
+                    signedApk
+                }
+                if (!DownloadOrchestrator.isApkValid(signedApk)) {
                     val errorMsg = "Patched APK verification failed: output file is corrupted or not a valid APK."
                     val failedJob = currentJob.failed(errorMsg).withLog("[ERROR] $errorMsg")
                     JobStore.updateJob(failedJob)
                     return@launch
                 }
-                currentJob = currentJob.copy(outputApkPath = apkToInstall.absolutePath)
-                val allApksToInstall = listOf(apkToInstall) + signedSplits
+                currentJob = currentJob.copy(outputApkPath = outputPathForRetry.absolutePath)
 
                 // 6. INSTALLING (if autoInstall = true)
                 if (currentJob.params.autoInstall) {
                     currentJob = currentJob.withStage(JobStage.INSTALLING, "Installing patched APK...", 95)
-                        .withLog("[INSTALL] Committing package install session for ${currentJob.params.packageName}")
+                        .withLog("[INSTALL] Committing package install session for ${currentJob.params.packageName} (${sessionInstallFiles.size} package(s))")
                     JobStore.updateJob(currentJob)
 
                     try {
                         val realPkg = try {
-                            ctx.packageManager.getPackageArchiveInfo(apkToInstall.absolutePath, 0)?.packageName
+                            ctx.packageManager.getPackageArchiveInfo(signedApk.absolutePath, 0)?.packageName
                         } catch (e: Exception) {
                             null
                         }
-                        if (splitFiles.isEmpty() && com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
-                            com.orion.store.platform.DhizukuBridge.install(ctx, apkToInstall)
+                        if (signedSplits.isEmpty() && com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
+                            com.orion.store.platform.DhizukuBridge.install(ctx, signedApk)
                         } else {
-                            val (status, msg) = com.orion.store.platform.SessionInstall.commit(ctx, allApksToInstall, realPkg, ask = true)
+                            val (status, msg) = com.orion.store.platform.SessionInstall.commit(ctx, sessionInstallFiles, realPkg, ask = true)
                             if (status != android.content.pm.PackageInstaller.STATUS_SUCCESS) {
-                                val isConflict = status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
-                                    msg?.contains("signatures do not match", ignoreCase = true) == true ||
-                                    msg?.contains("INCOMPATIBLE", ignoreCase = true) == true ||
-                                    msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                                val isMissingSplit = msg?.contains("MISSING_SPLIT", ignoreCase = true) == true
+                                val isConflict = !isMissingSplit && (
+                                    status == android.content.pm.PackageInstaller.STATUS_FAILURE_CONFLICT ||
+                                        msg?.contains("signatures do not match", ignoreCase = true) == true ||
+                                        msg?.contains("INCOMPATIBLE", ignoreCase = true) == true
+                                    )
                                 val isAborted = status == android.content.pm.PackageInstaller.STATUS_FAILURE_ABORTED ||
                                     status == -1 ||
                                     msg?.contains("cancelled", ignoreCase = true) == true ||
                                     msg?.contains("aborted", ignoreCase = true) == true
                                 val reason = when {
+                                    isMissingSplit -> "Split APK missing: ${currentJob.params.appName} requires companion split APKs. Re-run patching to download the complete bundle."
                                     isConflict -> "Signature or package conflict: An incompatible version of ${currentJob.params.appName} is installed on this device. Please uninstall the original app, then tap 'Install Built APK'."
-                                    isAborted -> "Installation was cancelled. The patched APK is ready; tap 'Install Built APK' to complete installation."
-                                    else -> "Installation failed (status $status): ${msg ?: "User cancelled or installation failed"}. The patched APK is ready; tap 'Install Built APK' to retry."
+                                    isAborted -> "Installation was cancelled. The patched build is ready; tap 'Install Built APK' to complete installation."
+                                    else -> "Installation failed (status $status): ${msg ?: "User cancelled or installation failed"}. The patched build is ready; tap 'Install Built APK' to retry."
                                 }
-                                val failedJob = currentJob.failed(reason, apkToInstall.absolutePath).withLog("[ERROR] $reason")
+                                val failedJob = currentJob.failed(reason, outputPathForRetry.absolutePath).withLog("[ERROR] $reason")
                                 JobStore.updateJob(failedJob)
                                 return@launch
                             }
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
-                        val failedJob = currentJob.failed("Install error: ${e.message}", apkToInstall.absolutePath)
+                        val failedJob = currentJob.failed("Install error: ${e.message}", outputPathForRetry.absolutePath)
                             .withLog("[ERROR] Install exception: ${e.message}")
                         JobStore.updateJob(failedJob)
                         return@launch
@@ -316,17 +330,18 @@ object PatchJobRunner {
 
                 // 7. SUCCEEDED
                 currentJob = currentJob.withStage(JobStage.SUCCEEDED, "Patch and installation completed successfully!", 100)
-                    .copy(outputApkPath = apkToInstall.absolutePath)
+                    .copy(outputApkPath = outputPathForRetry.absolutePath)
                     .withLog("[SUCCESS] Patched APK created and installed successfully!")
                 JobStore.updateJob(currentJob)
 
                 // Register with PatchedAppStore
+                val installedVerTag = (resolvedApk?.resolvedVersion ?: currentJob.params.targetVersion).ifEmpty { "1.0.0" }
                 PatchedAppStore.registerApp(
                     PatchedApp(
                         packageName = currentJob.params.packageName,
                         appName = currentJob.params.appName,
-                        installedVersion = currentJob.params.targetVersion.ifEmpty { "1.0.0" },
-                        targetVersion = currentJob.params.targetVersion.ifEmpty { "1.0.0" },
+                        installedVersion = installedVerTag,
+                        targetVersion = installedVerTag,
                         patchBundleId = currentJob.params.patchBundleId,
                         patchBundleVersion = "1.0.0",
                         appliedPatches = currentJob.params.selectedPatchIds,
@@ -337,7 +352,7 @@ object PatchJobRunner {
                 // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately
                 com.orion.store.ui.Store.settings.update { s ->
                     s.copy(
-                        installedVersions = s.installedVersions + (currentJob.params.packageName to currentJob.params.targetVersion.ifEmpty { "1.0.0" }),
+                        installedVersions = s.installedVersions + (currentJob.params.packageName to installedVerTag),
                         resolvedPackageNames = s.resolvedPackageNames + (currentJob.params.packageName to currentJob.params.packageName),
                         appManage = s.appManage + (currentJob.params.packageName to true)
                     )
@@ -357,6 +372,38 @@ object PatchJobRunner {
             }
         }
         runningJobs[job.id] = coroutineJob
+    }
+
+    private fun packApksBundle(baseApk: File, splits: List<File>, outFile: File) {
+        outFile.parentFile?.mkdirs()
+        java.util.zip.ZipOutputStream(java.io.FileOutputStream(outFile)).use { zos ->
+            val buf = ByteArray(65536)
+            fun addApk(name: String, src: File) {
+                val crc = java.util.zip.CRC32()
+                src.inputStream().use { inp ->
+                    var r: Int
+                    while (inp.read(buf).also { r = it } != -1) crc.update(buf, 0, r)
+                }
+                val entry = java.util.zip.ZipEntry(name).apply {
+                    method = java.util.zip.ZipEntry.STORED
+                    size = src.length()
+                    compressedSize = src.length()
+                    this.crc = crc.value
+                }
+                zos.putNextEntry(entry)
+                src.inputStream().use { inp ->
+                    var r: Int
+                    while (inp.read(buf).also { r = it } != -1) zos.write(buf, 0, r)
+                }
+                zos.closeEntry()
+            }
+            addApk("base.apk", baseApk)
+            splits.forEachIndexed { idx, split ->
+                if (split.exists() && split.length() > 0) {
+                    addApk("split_${idx}.apk", split)
+                }
+            }
+        }
     }
 
     fun cancel(jobId: String) {
