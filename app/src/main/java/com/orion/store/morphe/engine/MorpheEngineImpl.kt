@@ -1,25 +1,51 @@
 package com.orion.store.morphe.engine
 
-import com.orion.store.data.Net
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.Bundle
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.Message
+import android.os.Messenger
+import com.orion.store.OrionApp
+import com.orion.store.morphe.store.MorpheCatalogRepository
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
-import okhttp3.Request
-import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import java.io.File
-import java.io.FileOutputStream
-import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
+import java.util.Collections
+
+data class MppBundleInspection(
+    val mppFile: File,
+    val recommendedVersion: String = "",
+    val versionCodes: Map<String, Long> = emptyMap(),
+    val patchCount: Int = 0
+)
+
+private data class RemotePatchOutcome(
+    val success: Boolean,
+    val error: String? = null,
+    val appliedPatches: List<String> = emptyList(),
+    val skippedPatches: List<String> = emptyList()
+)
 
 /**
- * Concrete implementation of the Morphe Patch Engine interface.
- * Injects extension bytecode (.mpe) and patch assets into target multi-dex APKs.
+ * Concrete implementation of [PatchEngine] backed by `app.morphe:morphe-patcher`
+ * executing inside the isolated `:patcher` Service process (`android:largeHeap="true"`).
  */
 class MorpheEngineImpl : PatchEngine {
 
-    override val engineVersion: String = "2.2.0"
-    override val engineName: String = "Morphe DexPatcher Core"
+    override val engineVersion: String = "2.3.0"
+    override val engineName: String = "Morphe Patcher Core"
 
     override suspend fun verifyCompatibility(
         apkFile: File,
@@ -60,43 +86,110 @@ class MorpheEngineImpl : PatchEngine {
         selectedPatches: List<MorphePatch>,
         options: Map<String, String>,
         outputApk: File,
+        splitApks: List<File>,
+        onLog: (String) -> Unit,
         onProgress: (stage: String, percent: Int) -> Unit
     ): PatchResult = withContext(Dispatchers.IO) {
+        val collectedLogs = Collections.synchronizedList(mutableListOf<String>())
+        fun emitLog(line: String) {
+            collectedLogs.add(line)
+            onLog(line)
+        }
+
         try {
             outputApk.parentFile?.mkdirs()
-            onProgress("Parsing APK manifest and dex structures...", 10)
-            delay(100)
-
-            val pkg = options["packageName"] ?: ""
-            val bundleName = options["bundleName"] ?: ""
+            val pkg = options["packageName"].orEmpty()
+            val bundleName = options["bundleName"].orEmpty()
+            val preferredRepo = options["bundleRepo"].orEmpty()
+            val preferredDl = options["bundleDownloadUrl"].orEmpty()
             val clonePkg = options["clonePackageName"]?.trim().orEmpty()
             val deferCloning = options["deferCloning"] == "true"
-            val mppCacheDir = File(inputApk.parentFile, "mpp_cache").apply { mkdirs() }
+            val skipFailingPatches = options["skipFailingPatches"] != "false"
+            val allowUnsupportedVersion = options["allowUnsupportedVersion"] == "true"
 
-            // 1. Resolve .mpp extension bundle if applicable (e.g. HushGram)
-            val mppFile = resolveMppBundle(pkg, bundleName, mppCacheDir, onProgress)
+            emitLog("[ENGINE] Initializing $engineName v$engineVersion for $pkg")
+            onProgress("Resolving .mpp patch bundle...", 5)
 
-            val (extensionDexes, extensionAssets) = if (mppFile != null && mppFile.exists()) {
-                onProgress("Extracting bundle extensions and bytecode...", 25)
-                extractExtensionsFromMpp(mppFile)
-            } else {
-                emptyList<Pair<String, ByteArray>>() to emptyList<Pair<String, ByteArray>>()
+            // Look up bundleRepo/downloadUrl from catalog patches if not explicitly passed
+            val catalogRepoFromPatches = MorpheCatalogRepository.getPatchesForApp(pkg).first
+                .firstOrNull { p ->
+                    selectedPatches.any { it.name.equals(p.name, ignoreCase = true) } &&
+                        (p.bundleRepo.isNotBlank() || p.bundleDownloadUrl.isNotBlank())
+                }
+
+            val mppFile = MppBundleResolver.resolveBundleFile(
+                packageName = pkg,
+                preferredRepo = preferredRepo.ifBlank { catalogRepoFromPatches?.bundleRepo.orEmpty() },
+                preferredBundleName = bundleName.ifBlank { catalogRepoFromPatches?.bundleName.orEmpty() },
+                preferredDownloadUrl = preferredDl.ifBlank { catalogRepoFromPatches?.bundleDownloadUrl.orEmpty() },
+                onLog = ::emitLog
+            ) ?: return@withContext PatchResult.Failure(
+                reason = "Could not download or locate compiled .mpp patch bundle for $pkg (bundle='${bundleName.ifBlank { "default" }}'). Check repository connectivity.",
+                logs = collectedLogs.toList()
+            )
+
+            // Build option map minus internal orchestration keys
+            val internalKeys = setOf(
+                "packageName",
+                "bundleName",
+                "bundleRepo",
+                "bundleDownloadUrl",
+                "clonePackageName",
+                "deferCloning",
+                "skipFailingPatches",
+                "allowUnsupportedVersion"
+            )
+            val patchOptionsMap = buildMap<String, String> {
+                for (p in selectedPatches) {
+                    for (opt in p.options) {
+                        val value = when (opt.type) {
+                            OptionType.BOOLEAN -> opt.currentBoolean.toString()
+                            OptionType.INT -> opt.currentInt.toString()
+                            OptionType.STRING, OptionType.SELECTION -> opt.currentString
+                        }
+                        if (value.isNotEmpty() || options.containsKey(opt.key)) {
+                            put(opt.key, options[opt.key] ?: value)
+                        }
+                    }
+                }
+                for ((k, v) in options) {
+                    if (k !in internalKeys) put(k, v)
+                }
             }
 
-            // 2. Report progress for each selected patch
-            for ((index, patch) in selectedPatches.withIndex()) {
-                val pct = 25 + ((index + 1) * 55 / maxOf(1, selectedPatches.size))
-                onProgress("Applying patch [${index + 1}/${selectedPatches.size}]: ${patch.name}", pct)
-                delay(30)
+            val workDir = File(outputApk.parentFile, "patcher_work").apply {
+                deleteRecursively()
+                mkdirs()
             }
 
-            // 3. Inject extensions and write output APK
-            onProgress("Writing modified classes.dex files and resources...", 85)
-            mergeApkWithExtensions(inputApk, extensionDexes, extensionAssets, outputApk)
+            val serviceResult = runRemotePatcherService(
+                inputApk = inputApk,
+                splitApks = splitApks,
+                mppFile = mppFile,
+                outputApk = outputApk,
+                workDir = workDir,
+                packageName = pkg,
+                selectedPatchNames = selectedPatches.map { it.name },
+                optionsJson = Json.encodeToString(patchOptionsMap),
+                skipFailingPatches = skipFailingPatches,
+                allowUnsupportedVersion = allowUnsupportedVersion,
+                onLog = ::emitLog,
+                onProgress = onProgress
+            )
 
-            // Direct engine package cloning if requested in options
+            workDir.deleteRecursively()
+
+            if (!serviceResult.success) {
+                return@withContext PatchResult.Failure(
+                    reason = serviceResult.error ?: "MorphePatcherService failed",
+                    logs = collectedLogs.toList()
+                )
+            }
+
+            // Clone package cleanly only when cloning was requested inline
             if (!deferCloning && clonePkg.isNotEmpty() && clonePkg != pkg) {
-                onProgress("Cloning package to $clonePkg for side-by-side coexistence...", 92)
+                onProgress("Cloning package to $clonePkg for side-by-side install...", 92)
+                emitLog("[CLONE] Rewriting package ID $pkg -> $clonePkg")
                 val tempCloned = File(outputApk.parentFile, "cloned_temp_${System.currentTimeMillis()}.apk")
                 if (ApkCloner.clonePackage(outputApk, tempCloned, pkg, clonePkg)) {
                     tempCloned.copyTo(outputApk, overwrite = true)
@@ -105,160 +198,277 @@ class MorpheEngineImpl : PatchEngine {
             }
 
             onProgress("Patches applied successfully", 100)
-            return@withContext PatchResult.Success(
+            PatchResult.Success(
                 outputFile = outputApk,
-                logs = listOf(
-                    "Initialized $engineName v$engineVersion",
-                    "Selected ${selectedPatches.size} patches from bundle '$bundleName'",
-                    "Injected ${extensionDexes.size} Dalvik extension DEX modules and ${extensionAssets.size} assets",
-                    "Transformed Dalvik bytecode successfully"
-                )
+                logs = collectedLogs.toList(),
+                appliedPatches = serviceResult.appliedPatches,
+                skippedPatches = serviceResult.skippedPatches
             )
-        } catch (e: Exception) {
-            e.printStackTrace()
-            return@withContext PatchResult.Failure(reason = e.message ?: "Unknown patch engine error", error = e)
+        } catch (t: Throwable) {
+            emitLog("[ERROR] ${t.javaClass.simpleName}: ${t.message}")
+            PatchResult.Failure(
+                reason = t.message ?: "Unknown patch engine error",
+                error = t,
+                logs = collectedLogs.toList()
+            )
         }
     }
 
-    private suspend fun resolveMppBundle(
+    private val inspectionCache = java.util.concurrent.ConcurrentHashMap<String, MppBundleInspection>()
+
+    /**
+     * Resolves and inspects the target `.mpp` bundle in the isolated `:patcher` service to extract
+     * exact supported APK `version` strings and device-ABI `versionCodes`.
+     */
+    suspend fun inspectBundleForPackage(
         packageName: String,
-        bundleName: String,
-        targetDir: File,
-        onProgress: (String, Int) -> Unit
-    ): File? = withContext(Dispatchers.IO) {
-        try {
-            // HushGram for Instagram
-            if (packageName.contains("instagram", ignoreCase = true) || bundleName.contains("hush", ignoreCase = true)) {
-                val dest = File(targetDir, "hushgram_0.0.19.mpp")
-                if (dest.exists() && dest.length() > 100_000) return@withContext dest
-                onProgress("Downloading HushGram extension bundle (v0.0.19)...", 15)
-                val url = "https://github.com/SysAdminDoc/HushGram/releases/download/v0.0.19/patches-0.0.19.mpp"
-                val req = Request.Builder().url(url).build()
-                Net.client.newCall(req).execute().use { resp ->
-                    if (resp.isSuccessful) {
-                        val body = resp.body
-                        if (body != null) {
-                            FileOutputStream(dest).use { out -> body.byteStream().copyTo(out) }
-                            if (dest.length() > 100_000) return@withContext dest
-                        }
+        preferredRepo: String = "",
+        preferredBundleName: String = "",
+        preferredDownloadUrl: String = "",
+        onLog: (String) -> Unit = {}
+    ): MppBundleInspection? = withContext(Dispatchers.IO) {
+        val mppFile = MppBundleResolver.resolveBundleFile(
+            packageName = packageName,
+            preferredRepo = preferredRepo,
+            preferredBundleName = preferredBundleName,
+            preferredDownloadUrl = preferredDownloadUrl,
+            onLog = onLog
+        ) ?: return@withContext null
+
+        val cacheKey = "${mppFile.absolutePath}|${mppFile.lastModified()}|$packageName"
+        inspectionCache[cacheKey]?.let { return@withContext it }
+
+        val ctx = OrionApp.instance
+        val workDir = File(ctx.cacheDir, "morphe_inspect").apply { mkdirs() }
+        val resultDeferred = CompletableDeferred<MppBundleInspection?>()
+
+        val clientHandler = object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                if (msg.what == MorphePatcherService.MSG_INSPECT_RESULT) {
+                    val bundle = msg.data
+                    val ok = bundle.getBoolean(MorphePatcherService.KEY_SUCCESS, false)
+                    if (!ok) {
+                        val err = bundle.getString(MorphePatcherService.KEY_ERROR).orEmpty()
+                        if (err.isNotBlank()) onLog("[WARN] .mpp inspection failed: $err")
+                        resultDeferred.complete(null)
+                        return
                     }
+                    val recVer = bundle.getString(MorphePatcherService.KEY_RECOMMENDED_VERSION).orEmpty().trim()
+                    val count = bundle.getInt(MorphePatcherService.KEY_PATCH_COUNT, 0)
+                    val codesRaw = bundle.getString(MorphePatcherService.KEY_VERSION_CODES_JSON).orEmpty()
+                    val codesMap = runCatching {
+                        Json.parseToJsonElement(codesRaw).jsonObject
+                            .mapNotNull { (k, v) -> v.jsonPrimitive.longOrNull?.let { k to it } }
+                            .toMap()
+                    }.getOrDefault(emptyMap())
+                    resultDeferred.complete(
+                        MppBundleInspection(
+                            mppFile = mppFile,
+                            recommendedVersion = recVer,
+                            versionCodes = codesMap,
+                            patchCount = count
+                        )
+                    )
+                } else {
+                    super.handleMessage(msg)
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
         }
-        null
-    }
-
-    private fun extractExtensionsFromMpp(mppFile: File): Pair<List<Pair<String, ByteArray>>, List<Pair<String, ByteArray>>> {
-        val dexes = mutableListOf<Pair<String, ByteArray>>()
-        val assets = mutableListOf<Pair<String, ByteArray>>()
-
-        try {
-            ZipFile(mppFile).use { zip ->
-                for (entry in zip.entries().asSequence()) {
-                    val name = entry.name
-                    if (name.startsWith("extensions/") && name.endsWith(".mpe")) {
-                        zip.getInputStream(entry).use { input ->
-                            val bytes = input.readBytes()
-                            dexes.add(name to bytes)
-                        }
-                    } else if (name.startsWith("assets/") || name.startsWith("res/")) {
-                        zip.getInputStream(entry).use { input ->
-                            val bytes = input.readBytes()
-                            assets.add(name to bytes)
-                        }
+        val replyMessenger = Messenger(clientHandler)
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                if (service == null) {
+                    resultDeferred.complete(null)
+                    return
+                }
+                val remoteMessenger = Messenger(service)
+                val msg = Message.obtain(null, MorphePatcherService.MSG_INSPECT_MPP).apply {
+                    replyTo = replyMessenger
+                    data = Bundle().apply {
+                        putString(MorphePatcherService.KEY_MPP_FILE, mppFile.absolutePath)
+                        putString(MorphePatcherService.KEY_PACKAGE_NAME, packageName)
+                        putString(MorphePatcherService.KEY_WORK_DIR, workDir.absolutePath)
                     }
                 }
+                runCatching { remoteMessenger.send(msg) }.onFailure { resultDeferred.complete(null) }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+
+            override fun onServiceDisconnected(name: ComponentName?) {
+                if (!resultDeferred.isCompleted) resultDeferred.complete(null)
+            }
         }
-        return dexes to assets
+
+        val intent = Intent(ctx, MorphePatcherService::class.java)
+        val bound = ctx.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        if (!bound) return@withContext null
+
+        try {
+            val result = withTimeoutOrNull(25_000L) { resultDeferred.await() }
+            if (result != null) {
+                inspectionCache[cacheKey] = result
+            }
+            result
+        } finally {
+            runCatching { ctx.unbindService(connection) }
+        }
     }
 
-    private fun mergeApkWithExtensions(
+    private suspend fun runRemotePatcherService(
         inputApk: File,
-        extensionDexFiles: List<Pair<String, ByteArray>>,
-        extensionAssets: List<Pair<String, ByteArray>>,
-        outputApk: File
-    ) {
-        var maxDexIndex = 1
-        val dexRegex = Regex("""^classes(\d*)\.dex$""")
-        val existingEntryNames = mutableSetOf<String>()
+        splitApks: List<File>,
+        mppFile: File,
+        outputApk: File,
+        workDir: File,
+        packageName: String,
+        selectedPatchNames: List<String>,
+        optionsJson: String,
+        skipFailingPatches: Boolean,
+        allowUnsupportedVersion: Boolean,
+        onLog: (String) -> Unit,
+        onProgress: (String, Int) -> Unit
+    ): RemotePatchOutcome {
+        val ctx = OrionApp.instance
+        val resultDeferred = CompletableDeferred<RemotePatchOutcome>()
 
-        ZipFile(inputApk).use { inZip ->
-            for (entry in inZip.entries().asSequence()) {
-                val match = dexRegex.matchEntire(entry.name)
-                if (match != null) {
-                    val numStr = match.groupValues[1]
-                    val num = if (numStr.isEmpty()) 1 else numStr.toIntOrNull() ?: 1
-                    if (num > maxDexIndex) maxDexIndex = num
+        val clientHandler = object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                val bundle = msg.data
+                when (msg.what) {
+                    MorphePatcherService.MSG_LOG -> {
+                        bundle.getString(MorphePatcherService.KEY_LOG_LINE)?.let(onLog)
+                    }
+                    MorphePatcherService.MSG_PROGRESS -> {
+                        val stage = bundle.getString(MorphePatcherService.KEY_STAGE).orEmpty()
+                        val pct = bundle.getInt(MorphePatcherService.KEY_PERCENT, 0)
+                        onProgress(stage, pct)
+                    }
+                    MorphePatcherService.MSG_RESULT -> {
+                        val ok = bundle.getBoolean(MorphePatcherService.KEY_SUCCESS, false)
+                        val err = bundle.getString(MorphePatcherService.KEY_ERROR)
+                        val applied = bundle.getStringArrayList(MorphePatcherService.KEY_APPLIED_PATCHES).orEmpty()
+                        val skipped = bundle.getStringArrayList(MorphePatcherService.KEY_SKIPPED_PATCHES).orEmpty()
+                        resultDeferred.complete(
+                            RemotePatchOutcome(
+                                success = ok,
+                                error = err,
+                                appliedPatches = applied,
+                                skippedPatches = skipped
+                            )
+                        )
+                    }
+                    else -> super.handleMessage(msg)
+                }
+            }
+        }
+        val replyMessenger = Messenger(clientHandler)
+
+        val connection = object : ServiceConnection {
+            override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                if (service == null) {
+                    resultDeferred.complete(RemotePatchOutcome(false, "MorphePatcherService binder was null"))
+                    return
+                }
+                val remoteMessenger = Messenger(service)
+                val msg = Message.obtain(null, MorphePatcherService.MSG_RUN_PATCH).apply {
+                    replyTo = replyMessenger
+                    data = Bundle().apply {
+                        putString(MorphePatcherService.KEY_INPUT_APK, inputApk.absolutePath)
+                        putStringArrayList(MorphePatcherService.KEY_SPLIT_APKS, ArrayList(splitApks.map { it.absolutePath }))
+                        putString(MorphePatcherService.KEY_MPP_FILE, mppFile.absolutePath)
+                        putString(MorphePatcherService.KEY_OUTPUT_APK, outputApk.absolutePath)
+                        putString(MorphePatcherService.KEY_WORK_DIR, workDir.absolutePath)
+                        putString(MorphePatcherService.KEY_PACKAGE_NAME, packageName)
+                        putStringArrayList(MorphePatcherService.KEY_SELECTED_PATCHES, ArrayList(selectedPatchNames))
+                        putString(MorphePatcherService.KEY_OPTIONS_JSON, optionsJson)
+                        putBoolean(MorphePatcherService.KEY_SKIP_FAILING_PATCHES, skipFailingPatches)
+                        putBoolean(MorphePatcherService.KEY_ALLOW_UNSUPPORTED_VERSION, allowUnsupportedVersion)
+                    }
+                }
+                try {
+                    remoteMessenger.send(msg)
+                } catch (t: Throwable) {
+                    resultDeferred.complete(RemotePatchOutcome(false, "IPC dispatch failed: ${t.message}"))
                 }
             }
 
-            ZipOutputStream(FileOutputStream(outputApk)).use { outZip ->
-                val buffer = ByteArray(65536)
-                // Copy existing entries from inputApk, omitting stale signature files so apksig can sign cleanly.
-                // Crucial: resources.arsc, *.so native libs, and originally STORED entries MUST remain ZipEntry.STORED
-                // so Android R+ (API 30+) resources.arsc and extractNativeLibs="false" validation succeeds.
+            override fun onServiceDisconnected(name: ComponentName?) {
+                if (!resultDeferred.isCompleted) {
+                    resultDeferred.complete(
+                        RemotePatchOutcome(false, ":patcher process terminated unexpectedly (check memory/OOM logs)")
+                    )
+                }
+            }
+        }
+
+        val intent = Intent(ctx, MorphePatcherService::class.java)
+        val bound = ctx.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+        if (!bound) {
+            return RemotePatchOutcome(false, "Unable to bind isolated :patcher service")
+        }
+
+        return try {
+            resultDeferred.await()
+        } finally {
+            runCatching { ctx.unbindService(connection) }
+        }
+    }
+
+    override suspend fun zipalign(inputApk: File, alignedApk: File): Boolean = withContext(Dispatchers.IO) {
+        alignedApk.parentFile?.mkdirs()
+        if (!inputApk.exists()) return@withContext false
+        try {
+            // Ensure resources.arsc and native .so libs are uncompressed (STORED) for Android R+ / 16KB alignment
+            val needsRewrite = java.util.zip.ZipFile(inputApk).use { zip ->
+                zip.entries().asSequence().any { e ->
+                    !e.isDirectory &&
+                        (e.name == "resources.arsc" || e.name.endsWith(".so", ignoreCase = true)) &&
+                        e.method != java.util.zip.ZipEntry.STORED
+                }
+            }
+            if (!needsRewrite) {
+                inputApk.copyTo(alignedApk, overwrite = true)
+            } else {
+                rewriteEnsuringStoredEntries(inputApk, alignedApk)
+            }
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    private fun rewriteEnsuringStoredEntries(inputApk: File, outputApk: File) {
+        val buf = ByteArray(65536)
+        java.util.zip.ZipFile(inputApk).use { inZip ->
+            java.util.zip.ZipOutputStream(java.io.FileOutputStream(outputApk)).use { outZip ->
                 for (entry in inZip.entries().asSequence()) {
-                    val name = entry.name
-                    if (name.startsWith("META-INF/") && (name.endsWith(".SF", true) || name.endsWith(".RSA", true) || name.endsWith(".DSA", true) || name.endsWith(".EC", true) || name.equals("META-INF/MANIFEST.MF", true))) {
-                        continue
-                    }
-                    existingEntryNames.add(name)
-
-                    val mustStore = name == "resources.arsc" ||
-                        name.endsWith(".so", ignoreCase = true) ||
-                        entry.method == ZipEntry.STORED
-
-                    val newEntry = ZipEntry(name)
+                    val mustStore = !entry.isDirectory && (
+                        entry.name == "resources.arsc" ||
+                            entry.name.endsWith(".so", ignoreCase = true) ||
+                            entry.method == java.util.zip.ZipEntry.STORED
+                        )
+                    val outEntry = java.util.zip.ZipEntry(entry.name)
                     if (mustStore) {
-                        newEntry.method = ZipEntry.STORED
-                        if (entry.size >= 0L && entry.crc != -1L) {
-                            newEntry.size = entry.size
-                            newEntry.compressedSize = entry.size
-                            newEntry.crc = entry.crc
-                        } else {
-                            val (computedSize, computedCrc) = computeSizeAndCrc(inZip, entry, buffer)
-                            newEntry.size = computedSize
-                            newEntry.compressedSize = computedSize
-                            newEntry.crc = computedCrc
+                        outEntry.method = java.util.zip.ZipEntry.STORED
+                        val (sz, crcVal) = streamSizeAndCrc(inZip, entry, buf)
+                        outEntry.size = sz
+                        outEntry.compressedSize = sz
+                        outEntry.crc = crcVal
+                        outZip.putNextEntry(outEntry)
+                        inZip.getInputStream(entry).use { inp ->
+                            var r: Int
+                            while (inp.read(buf).also { r = it } != -1) outZip.write(buf, 0, r)
                         }
+                        outZip.closeEntry()
                     } else {
-                        newEntry.method = ZipEntry.DEFLATED
-                    }
-
-                    outZip.putNextEntry(newEntry)
-                    if (!entry.isDirectory) {
-                        inZip.getInputStream(entry).use { input ->
-                            var read: Int
-                            while (input.read(buffer).also { read = it } != -1) {
-                                outZip.write(buffer, 0, read)
+                        outEntry.method = java.util.zip.ZipEntry.DEFLATED
+                        outZip.putNextEntry(outEntry)
+                        if (!entry.isDirectory) {
+                            inZip.getInputStream(entry).use { inp ->
+                                var r: Int
+                                while (inp.read(buf).also { r = it } != -1) outZip.write(buf, 0, r)
                             }
                         }
-                    }
-                    outZip.closeEntry()
-                }
-
-                // Append extension DEX files as classesN.dex
-                var currentDex = maxDexIndex + 1
-                for ((_, dexBytes) in extensionDexFiles) {
-                    val dexName = "classes$currentDex.dex"
-                    val newEntry = ZipEntry(dexName)
-                    outZip.putNextEntry(newEntry)
-                    outZip.write(dexBytes)
-                    outZip.closeEntry()
-                    currentDex++
-                }
-
-                // Append extension assets
-                for ((assetPath, assetBytes) in extensionAssets) {
-                    if (!existingEntryNames.contains(assetPath)) {
-                        val newEntry = ZipEntry(assetPath)
-                        outZip.putNextEntry(newEntry)
-                        outZip.write(assetBytes)
                         outZip.closeEntry()
                     }
                 }
@@ -266,31 +476,21 @@ class MorpheEngineImpl : PatchEngine {
         }
     }
 
-    private fun computeSizeAndCrc(zip: ZipFile, entry: ZipEntry, buffer: ByteArray): Pair<Long, Long> {
+    private fun streamSizeAndCrc(
+        zip: java.util.zip.ZipFile,
+        entry: java.util.zip.ZipEntry,
+        buf: ByteArray
+    ): Pair<Long, Long> {
         val crc = java.util.zip.CRC32()
         var total = 0L
-        zip.getInputStream(entry).use { input ->
-            var read: Int
-            while (input.read(buffer).also { read = it } != -1) {
-                crc.update(buffer, 0, read)
-                total += read
+        zip.getInputStream(entry).use { inp ->
+            var r: Int
+            while (inp.read(buf).also { r = it } != -1) {
+                crc.update(buf, 0, r)
+                total += r
             }
         }
         return total to crc.value
-    }
-
-    override suspend fun zipalign(inputApk: File, alignedApk: File): Boolean = withContext(Dispatchers.IO) {
-        alignedApk.parentFile?.mkdirs()
-        if (!inputApk.exists()) return@withContext false
-        try {
-            // Preserve STORED method on resources.arsc and .so files; KeyStoreManager uses apksig
-            // (with alignmentPreserved=false and libraryPageAlignmentBytes=16384) to apply exact alignment.
-            inputApk.copyTo(alignedApk, overwrite = true)
-            true
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
-        }
     }
 
     override suspend fun signApk(inputApk: File, signedApk: File, keyAlias: String): Boolean {

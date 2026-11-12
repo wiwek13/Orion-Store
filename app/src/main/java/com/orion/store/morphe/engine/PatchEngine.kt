@@ -34,6 +34,7 @@ data class MorphePatch(
     val name: String,
     val description: String,
     val version: String,
+    val category: String = "",
     val compatiblePackages: List<String> = emptyList(),
     val compatibleVersions: List<String> = emptyList(), // empty = any version
     val isUniversal: Boolean = false,
@@ -62,7 +63,12 @@ data class PatchBundle(
  * Result of a patching operation.
  */
 sealed class PatchResult {
-    data class Success(val outputFile: File, val logs: List<String>) : PatchResult()
+    data class Success(
+        val outputFile: File,
+        val logs: List<String>,
+        val appliedPatches: List<String> = emptyList(),
+        val skippedPatches: List<String> = emptyList()
+    ) : PatchResult()
     data class Failure(val reason: String, val error: Throwable? = null, val logs: List<String> = emptyList()) : PatchResult()
 }
 
@@ -98,6 +104,8 @@ interface PatchEngine {
         selectedPatches: List<MorphePatch>,
         options: Map<String, String>,
         outputApk: File,
+        splitApks: List<File> = emptyList(),
+        onLog: (String) -> Unit = {},
         onProgress: (stage: String, percent: Int) -> Unit
     ): PatchResult
 

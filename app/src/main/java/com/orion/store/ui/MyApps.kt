@@ -34,9 +34,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.orion.store.data.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val Sky = Color(0xFF0EA5E9)
+private data class MyAppsIoCache(
+    val builtApks: Map<String, File> = emptyMap(),
+    val readyPatchCount: Int = 0
+)
+
 private fun filterIcon(f: MyAppsFilter) = when (f) {
     MyAppsFilter.ALL -> Sym.Inventory2; MyAppsFilter.INSTALLED -> Sym.CheckCircle
     MyAppsFilter.DOWNLOADED -> Sym.Download; MyAppsFilter.UPDATES -> Sym.ArrowUpward
@@ -52,6 +59,7 @@ private val EMPTY = mapOf(
 
 @Composable
 private fun tone(r: MyAppRow): Pair<ImageVector, Color> = when {
+    r.status == "patching" -> Sym.Build to MaterialTheme.colorScheme.primary
     r.status == "downloading" -> Sym.ArrowDownward to MaterialTheme.colorScheme.primary
     r.status == "ready" -> Sym.Inventory to Safe
     r.hasUpdate -> Sym.ArrowUpward to Caution
@@ -63,7 +71,7 @@ private fun tone(r: MyAppRow): Pair<ImageVector, Color> = when {
 @Composable
 fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
     val s = LocalS.current; val d = LocalD.current
-    val filters = myAppsFilterOrder(s.myAppsFilters)
+    val filters = remember(s.myAppsFilters) { myAppsFilterOrder(s.myAppsFilters) }
     var savedFilter by rememberSaveable { mutableStateOf(MyAppsFilter.ALL.name) }
     val pager = rememberPagerState(initialPage = filters.indexOfFirst { it.name == savedFilter }.coerceAtLeast(0)) { filters.size }
     val pageFilter = filters.getOrElse(pager.currentPage) { filters.first() }
@@ -71,23 +79,97 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
     val scope = rememberCoroutineScope()
     val query = vm.libraryQuery
     var unmanagedOpen by rememberSaveable { mutableStateOf(false) }
-    val updateIds = vm.updates.map { it.id }.toSet()
-    val rows = remember(d, s, updateIds) { buildMyAppsRows(vm.allApps(), s, d, updateIds) }
-    val pending = rows.filter { it.hasUpdate && it.status != "downloading" }
-    val visible = rows.filter { it.matches(pageFilter) && it.matchesQuery(query) }
-    val patchJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsState()
-    val activePatchJobs = remember(patchJobs) { patchJobs.filter { it.stage.isActive } }
-    val readyPatchJobs = remember(patchJobs) {
-        patchJobs.filter { job ->
-            job.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED &&
-                job.outputApkPath?.let { java.io.File(it) }?.takeIf { it.exists() && it.length() > 0 } != null
+    val patchJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsStateWithLifecycle()
+    val patchedApps by com.orion.store.morphe.store.PatchedAppStore.apps.collectAsStateWithLifecycle()
+    val allApps = vm.allApps()
+    val updateIds = remember(vm.updates) { vm.updates.mapTo(HashSet()) { it.id } }
+    val jobRowKey = remember(patchJobs) {
+        patchJobs.map { "${it.id}:${it.stage}:${it.progress}:${it.outputApkPath.orEmpty()}:${it.createdAt}" }
+    }
+    val rows = remember(allApps, d, s, updateIds, patchedApps, jobRowKey) {
+        buildMyAppsRows(allApps, s, d, updateIds, patchedApps, patchJobs)
+    }
+    val activeJobsByPkg = remember(patchJobs) {
+        buildMap<String, com.orion.store.morphe.model.PatchJob> {
+            for (job in patchJobs) {
+                if (job.stage.isActive) {
+                    val eff = job.params.effectivePackageName()
+                    put(eff, job)
+                    if (eff == job.params.packageName) put(job.params.packageName, job)
+                }
+            }
         }
     }
-    val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchJobs.size + readyPatchJobs.size
+    val latestJobsByPkg = remember(jobRowKey) {
+        buildMap<String, com.orion.store.morphe.model.PatchJob> {
+            for (job in patchJobs) {
+                val eff = job.params.effectivePackageName()
+                val prevEff = get(eff)
+                if (prevEff == null || job.createdAt > prevEff.createdAt) {
+                    put(eff, job)
+                }
+                if (eff == job.params.packageName) {
+                    val prevPkg = get(job.params.packageName)
+                    if (prevPkg == null || job.createdAt > prevPkg.createdAt) {
+                        put(job.params.packageName, job)
+                    }
+                }
+            }
+        }
+    }
+    val jobIoKey = remember(patchJobs) {
+        patchJobs.map { Triple(it.id, it.stage, it.outputApkPath) }
+    }
+    val rowIoKey = remember(rows) {
+        rows.map { Triple(it.app.id, it.status, it.isPatched) }
+    }
+    val ioCache by produceState(
+        initialValue = MyAppsIoCache(),
+        key1 = rowIoKey,
+        key2 = jobIoKey
+    ) {
+        value = withContext(Dispatchers.IO) {
+            val downloadsFiles = runCatching {
+                com.orion.store.platform.Downloads.dir().listFiles()?.filter {
+                    it.isFile && it.name.startsWith("Patched_", ignoreCase = true) && it.length() > 0
+                }
+            }.getOrNull().orEmpty()
+            val builtMap = HashMap<String, File>(rows.size)
+            for (r in rows) {
+                val pkg = s.resolvedPackageNames[r.app.id] ?: r.app.packageName ?: r.app.id
+                val targetJob = latestJobsByPkg[pkg]
+                val found = targetJob?.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
+                    ?: com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(r.app.name, pkg)
+                    ?: downloadsFiles.firstOrNull { f ->
+                        val cleanAppName = r.app.name.replace(" ", "_")
+                        f.name.contains(pkg, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)
+                    }
+                if (found != null) builtMap[r.app.id] = found
+            }
+            val readyCount = patchJobs.count { job ->
+                job.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED &&
+                    job.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 } != null
+            }
+            MyAppsIoCache(builtMap, readyCount)
+        }
+    }
+    val pending = remember(rows) { rows.filter { it.hasUpdate && it.status != "downloading" && it.status != "patching" } }
+    val filterCounts = remember(rows) { MyAppsFilter.entries.associateWith { f -> rows.count { it.matches(f) } } }
+    val visible = remember(rows, pageFilter, query) { rows.filter { it.matches(pageFilter) && it.matchesQuery(query) } }
+    val activePatchCount = remember(patchJobs) { patchJobs.count { it.stage.isActive } }
+    val queue = d.activeDownloads.size + d.readyToInstall.size + activePatchCount + ioCache.readyPatchCount
+    val ignoredNow = remember(rows, s.ignoredUpdates) { System.currentTimeMillis() }
+    val lookup = vm.lookup
+    val ignoredList = remember(s.ignoredUpdates, s.appManage, lookup, ignoredNow) {
+        s.ignoredUpdates.keys.mapNotNull { id -> lookup[id]?.takeIf { isManaged(id, s) && isUpdateIgnored(it, s, ignoredNow) } }
+    }
+    val unmanagedList = remember(allApps, s) {
+        allApps.filter { !isManaged(it.id, s) && (it.id in s.installedVersions || s.appManage[it.id] == false) }
+    }
     val cs = MaterialTheme.colorScheme
     // Long-press an installed app to start picking, tap more to add them, then uninstall them together
     var picked by rememberSaveable { mutableStateOf(emptySet<String>()) }
-    val removable = visible.filter { it.isInstalledNow && it.app.installsHere() }
+    val removable = remember(visible) { visible.filter { it.isInstalledNow && it.app.installsHere() } }
     LaunchedEffect(rows) { picked = picked.filterTo(mutableSetOf()) { id -> rows.any { it.app.id == id && it.isInstalledNow } } }
     androidx.activity.compose.BackHandler(picked.isNotEmpty()) { picked = emptySet() }
     Column(Modifier.fillMaxSize().readableWidth()) {
@@ -99,7 +181,7 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
                     if (queue > 0) { Spacer(Modifier.width(6.dp)); Badge { Text("$queue") } }
                 }
                 VerticalDivider(Modifier.height(28.dp).padding(horizontal = 4.dp), color = cs.outlineVariant)
-                FilterPills(vm, s.myAppsFilters) { f -> Choice(pageFilter == f, "${f.label} · ${rows.count { it.matches(f) }}", filterIcon(f)) {
+                FilterPills(vm, s.myAppsFilters) { f -> Choice(pageFilter == f, "${f.label} · ${filterCounts[f] ?: 0}", filterIcon(f)) {
                     scope.launch { pager.animateScrollToPage(filters.indexOf(f).coerceAtLeast(0)) }
                 } }
             }
@@ -116,51 +198,58 @@ fun MyAppsTab(vm: MainViewModel, padding: PaddingValues) {
         }
         HorizontalPager(pager, Modifier.weight(1f)) { page ->
             val filter = filters[page]
-            val shown = rows.filter { it.matches(filter) && it.matchesQuery(query) }
+            val shown = remember(rows, filter, query) { rows.filter { it.matches(filter) && it.matchesQuery(query) } }
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = padding.calculateBottomPadding())) {
-                if (filter == MyAppsFilter.UPDATES && pending.isNotEmpty()) item {
+                if (filter == MyAppsFilter.UPDATES && pending.isNotEmpty()) item("update-all") {
                     CtaButton("Update all (${pending.size})", { vm.haptic(H.MEDIUM); pending.forEach { vm.download(it.app) } }, Modifier.padding(horizontal = 16.dp, vertical = 4.dp), Sym.SystemUpdate)
                 }
                 if (vm.loading) item("loading") { StoreSkeleton(false) }
-                else if (shown.isEmpty()) item {
+                else if (shown.isEmpty()) item("empty-${filter.name}") {
                     if (query.isNotBlank()) Column(Modifier.fillMaxWidth().padding(40.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(Sym.SearchOff, null, Modifier.size(48.dp), tint = cs.onSurfaceVariant)
                         Text("No apps matching “$query”", Modifier.padding(top = 12.dp), style = MaterialTheme.typography.titleMedium)
                         TextButton({ vm.libraryQuery = "" }) { Text("Clear search") }
                     } else EmptyState(filterIcon(filter), EMPTY.getValue(filter), if (filter == MyAppsFilter.ALL) "Apps you download from Orion show up here. Swipe sideways for the other lists." else "Swipe sideways for the other lists.", Modifier.padding(top = 32.dp))
                 }
-                itemsIndexed(shown, key = { _, it -> it.app.id }) { i, r ->
+                itemsIndexed(shown, key = { _, it -> it.app.id }, contentType = { _, _ -> "library_row" }) { _, r ->
+                    val pkg = s.resolvedPackageNames[r.app.id] ?: r.app.packageName ?: r.app.id
                     val can = r.isInstalledNow && r.app.installsHere()
-                    LibraryRow(vm, r, Modifier.animateItem().reveal(i), if (picked.isEmpty()) null else (r.app.id in picked),
-                        onPick = if (!can) null else ({ vm.haptic(H.SELECTION); picked = if (r.app.id in picked) picked - r.app.id else picked + r.app.id }))
+                    LibraryRow(
+                        vm = vm,
+                        r = r,
+                        pkg = pkg,
+                        activeJob = activeJobsByPkg[pkg],
+                        targetJob = latestJobsByPkg[pkg],
+                        builtApk = ioCache.builtApks[r.app.id],
+                        modifier = Modifier.animateItem(),
+                        picked = if (picked.isEmpty()) null else (r.app.id in picked),
+                        onPick = if (!can) null else ({ vm.haptic(H.SELECTION); picked = if (r.app.id in picked) picked - r.app.id else picked + r.app.id })
+                    )
                 }
-                val now = System.currentTimeMillis(); val lookup = vm.lookup
-                val ignored = if (filter == MyAppsFilter.ALL || filter == MyAppsFilter.UPDATES)
-                    s.ignoredUpdates.keys.mapNotNull { id -> lookup[id]?.takeIf { isManaged(id, s) && isUpdateIgnored(it, s, now) } } else emptyList()
+                val ignored = if (filter == MyAppsFilter.ALL || filter == MyAppsFilter.UPDATES) ignoredList else emptyList()
                 if (ignored.isNotEmpty()) item("ignored-title") {
                     Text("Ignored updates · ${ignored.size}", Modifier.padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 8.dp), style = MaterialTheme.typography.titleMediumEmphasized)
                 }
-                itemsIndexed(ignored, key = { _, a -> "ignored-${a.id}" }) { i, a ->
+                itemsIndexed(ignored, key = { _, a -> "ignored-${a.id}" }, contentType = { _, _ -> "side_row" }) { i, a ->
                     val ig = s.ignoredUpdates[a.id]
                     val until = when (ig?.type) {
-                        "week" -> ((ONE_WEEK_MS - (now - (ig.timestamp ?: now))) / 86_400_000L + 1).coerceIn(1, 7).let { "Hidden for $it more day${if (it == 1L) "" else "s"}" }
+                        "week" -> ((ONE_WEEK_MS - (ignoredNow - (ig.timestamp ?: ignoredNow))) / 86_400_000L + 1).coerceIn(1, 7).let { "Hidden for $it more day${if (it == 1L) "" else "s"}" }
                         "version" -> "Hidden until the next version"; else -> "Hidden for good"
                     }
                     SideRow(a, i, ignored.size, until, "Unignore") { vm.set { it.copy(ignoredUpdates = it.ignoredUpdates - a.id) } }
                 }
                 if (filter == MyAppsFilter.ALL || filter == MyAppsFilter.INSTALLED) {
-                    val off = vm.allApps().filter { !isManaged(it.id, s) && (it.id in s.installedVersions || s.appManage[it.id] == false) }
-                    if (off.isNotEmpty()) item("unmanaged-title") {
+                    if (unmanagedList.isNotEmpty()) item("unmanaged-title") {
                         val open = unmanagedOpen
                         Row(Modifier.fillMaxWidth().padding(top = 16.dp).clickable { vm.haptic(H.SELECTION); unmanagedOpen = !open }.padding(start = 24.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                             verticalAlignment = Alignment.CenterVertically) {
-                            Text("Not managed · ${off.size}", Modifier.weight(1f), style = MaterialTheme.typography.titleMediumEmphasized)
+                            Text("Not managed · ${unmanagedList.size}", Modifier.weight(1f), style = MaterialTheme.typography.titleMediumEmphasized)
                             Icon(if (open) Sym.ExpandLess else Sym.ExpandMore, if (open) "Collapse" else "Expand", tint = cs.onSurfaceVariant)
                         }
                     }
-                    if (unmanagedOpen) itemsIndexed(off, key = { _, a -> "unmanaged-${a.id}" }) { i, a ->
+                    if (unmanagedOpen) itemsIndexed(unmanagedList, key = { _, a -> "unmanaged-${a.id}" }, contentType = { _, _ -> "side_row" }) { i, a ->
                         val why = if (s.appManage[a.id] == false) "Hidden by you" else otherStore(a.id, s)?.let { "Installed by ${vm.tracker.labelOf(it)}" } ?: "Not managed"
-                        SideRow(a, i, off.size, why, "Manage") { vm.set { it.withManaged(a.id, true) } }
+                        SideRow(a, i, unmanagedList.size, why, "Manage") { vm.set { it.withManaged(a.id, true) } }
                     }
                 }
             }
@@ -207,38 +296,25 @@ private fun FilterPills(vm: MainViewModel, saved: List<String>, pill: @Composabl
 }
 
 @Composable
-private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picked: Boolean? = null, onPick: (() -> Unit)? = null) {
-    val (icon, c) = tone(r); val cs = MaterialTheme.colorScheme; val compact = LocalS.current.compactMode
+private fun LibraryRow(
+    vm: MainViewModel,
+    r: MyAppRow,
+    pkg: String,
+    activeJob: com.orion.store.morphe.model.PatchJob?,
+    targetJob: com.orion.store.morphe.model.PatchJob?,
+    builtApk: File?,
+    modifier: Modifier,
+    picked: Boolean? = null,
+    onPick: (() -> Unit)? = null
+) {
+    val (icon, c) = tone(r); val cs = MaterialTheme.colorScheme; val s = LocalS.current; val compact = s.compactMode
     val bg by animateColorAsState(if (picked == true) cs.secondaryContainer else Color.Transparent, label = "pick")
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-
-    val pkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName ?: r.app.id
-    val morpheJobs by com.orion.store.morphe.store.JobStore.jobs.collectAsStateWithLifecycle()
-    val activeJob = remember(morpheJobs, pkg) {
-        morpheJobs.firstOrNull { it.params.packageName == pkg && it.stage.isActive }
-    }
-    val targetJob = remember(morpheJobs, pkg) {
-        morpheJobs.filter { it.params.packageName == pkg }.maxByOrNull { it.createdAt }
-    }
-    val builtApk = remember(targetJob, pkg, r.app.name) {
-        targetJob?.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
-            ?: runCatching {
-                val downloads = com.orion.store.platform.Downloads.dir()
-                val cleanAppName = r.app.name.replace(" ", "_")
-                downloads.listFiles()?.firstOrNull { f ->
-                    f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
-                        (f.name.contains(pkg, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)) &&
-                        f.length() > 0
-                }
-            }.getOrNull()
-    }
     var showActiveJobLogSheet by remember { mutableStateOf(false) }
 
     // While picking a tap toggles the row (rows that can't be uninstalled do nothing); otherwise a long-press starts picking
     Column(modifier.fillMaxWidth().padding(horizontal = 8.dp).background(bg, RoundedCornerShape(20.dp))
         .springClick(onLongClick = if (picked == null) onPick else null) { if (picked == null) vm.selectApp(r.app, "lib") else onPick?.invoke() }
-        .animateContentSize().padding(horizontal = 12.dp, vertical = if (compact) 4.dp else 10.dp)) {
+        .padding(horizontal = 12.dp, vertical = if (compact) 4.dp else 10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             val size = if (compact) 40.dp else 52.dp
             Box(contentAlignment = Alignment.Center) {
@@ -247,62 +323,45 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
             }
             Spacer(Modifier.width(if (compact) 12.dp else 16.dp))
             Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(r.app.name, Modifier.weight(1f, fill = false), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    if (r.isPatched) {
-                        Spacer(Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(6.dp),
-                            color = cs.tertiaryContainer,
-                            contentColor = cs.onTertiaryContainer
-                        ) {
-                            Text(
-                                "Patched",
-                                Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                        }
-                    }
-                }
+                Text(r.app.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (!compact) {
-                    val subtitle = listOfNotNull(
-                        r.app.author.takeIf { it.isNotBlank() },
-                        r.app.platform.takeIf { it.isNotBlank() },
-                        r.versionDetail.takeIf { it.isNotBlank() }
-                    ).joinToString(" · ")
+                    val subtitle = remember(r.app.author, r.app.platform, r.versionDetail) {
+                        listOfNotNull(
+                            r.app.author.takeIf { it.isNotBlank() },
+                            r.app.platform.takeIf { it.isNotBlank() },
+                            r.versionDetail.takeIf { it.isNotBlank() }
+                        ).joinToString(" · ")
+                    }
                     Text(subtitle, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(icon, null, Modifier.size(14.dp), tint = c); Spacer(Modifier.width(4.dp))
-                    Text(r.statusLabel, style = MaterialTheme.typography.labelMedium, color = c, maxLines = 1)
+                    Text(r.statusLabel, style = MaterialTheme.typography.labelMedium, color = c, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
             val action = r.primaryAction
+            val hasNewBuiltApk = builtApk != null && (
+                !r.isInstalledNow ||
+                    (targetJob != null && !targetJob.params.autoInstall && targetJob.stage == com.orion.store.morphe.model.JobStage.SUCCEEDED && targetJob.createdAt > (r.installedAt ?: 0L))
+                )
             if (r.hasSavedApk && action in setOf("install", "update", "download")) IconButton({ vm.deleteLibraryApk(r.app) }) { Icon(Sym.DeleteOutline, "Delete APK") }
             @Composable fun Primary(label: String, onClick: () -> Unit) =
-                FilledTonalButton(onClick, shapes = ButtonDefaults.shapes(), contentPadding = ButtonDefaults.SmallContentPadding) { Text(label) }
+                FilledTonalButton(onClick, shapes = ButtonDefaults.shapes(), contentPadding = ButtonDefaults.SmallContentPadding) { Text(label, maxLines = 1, softWrap = false) }
             when {
                 activeJob != null -> FilledTonalButton({ showActiveJobLogSheet = true }, shapes = ButtonDefaults.shapes(), contentPadding = ButtonDefaults.SmallContentPadding) {
-                    Icon(Sym.Build, null, Modifier.size(14.dp))
+                    Icon(Sym.Terminal, null, Modifier.size(16.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text("Logs")
+                    Text("Logs", maxLines = 1, softWrap = false)
                 }
-                builtApk != null -> {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        IconButton({ vm.haptic(H.LIGHT); vm.showInFolder(builtApk) }) {
-                            Icon(Sym.FolderOpen, "Show in Folder", Modifier.size(20.dp), tint = cs.primary)
-                        }
-                        Primary("Install Patched") {
-                            if (targetJob != null) vm.installPatchedApk(targetJob) else vm.installFile(r.app, builtApk.absolutePath)
-                        }
+                hasNewBuiltApk -> {
+                    val apk = builtApk!!
+                    Primary("Install") {
+                        if (targetJob != null) vm.installPatchedApk(targetJob) else vm.installFile(r.app, apk.absolutePath)
                     }
                 }
                 r.status == "downloading" -> FilledTonalIconButton({ vm.cancelDownload(r.app.id) }, shapes = IconButtonDefaults.shapes()) { Icon(Sym.Close, "Cancel download") }
                 action == "install" -> Primary("Install") { r.savedFile?.let { vm.installFile(r.app, it) } }
-                action == "repatch" -> Primary("Repatch") {
+                action == "repatch" -> Primary("Update") {
                     val p = r.app.packageName ?: r.app.id
                     val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
                     vm.openMorpheInstall(morpheApp)
@@ -310,29 +369,26 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                 action == "update" -> Primary("Update") { vm.download(r.app) }
                 action == "download" -> Primary("Download") { vm.download(r.app) }
                 action == "delete" -> IconButton({ vm.deleteLibraryApk(r.app) }) { Icon(Sym.DeleteOutline, "Delete APK") }
-                r.isPatched -> Primary("Repatch") {
-                    val p = r.app.packageName ?: r.app.id
-                    val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p) ?: com.orion.store.morphe.store.MorpheCatalogApp(packageName = p, name = r.app.name)
-                    vm.openMorpheInstall(morpheApp)
-                }
                 !r.isInstalledNow || !r.app.installsHere() -> Icon(Sym.ChevronRight, "Open details", tint = cs.onSurfaceVariant)
             }
-            if (picked == null && (r.isInstalledNow || builtApk != null || targetJob != null) && r.status != "downloading") Box {
+            if (picked == null && r.status != "downloading") Box {
                 var menu by remember { mutableStateOf(false) }
                 IconButton({ menu = true; vm.haptic(H.LIGHT) }) { Icon(Sym.MoreVert, "More options for ${r.app.name}") }
                 DropdownMenu(menu, { menu = false }, shape = RoundedCornerShape(20.dp)) {
                     val resolvedPkg = LocalS.current.resolvedPackageNames[r.app.id] ?: r.app.packageName
 
-                    if (builtApk != null) {
+                    if (builtApk != null || r.isPatched || r.hasSavedApk) {
                         DropdownMenuItem(
                             text = { Text("Show in Folder") },
                             onClick = {
                                 menu = false
                                 vm.haptic(H.LIGHT)
-                                vm.showInFolder(builtApk)
+                                vm.showInFolder(builtApk ?: com.orion.store.platform.OrionStorageManager.getAppDir(r.app.name, pkg))
                             },
                             leadingIcon = { Icon(Sym.FolderOpen, null) }
                         )
+                    }
+                    if (builtApk != null) {
                         DropdownMenuItem(
                             text = { Text("Install Patched APK") },
                             onClick = {
@@ -356,19 +412,12 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                         )
                     }
 
-                    if (builtApk != null || targetJob != null) {
+                    if (builtApk != null || targetJob != null || r.isPatched) {
                         DropdownMenuItem(
                             text = { Text("Remove Patched Build", color = cs.error) },
                             onClick = {
                                 menu = false
-                                vm.haptic(H.LIGHT)
-                                targetJob?.let { com.orion.store.morphe.store.JobStore.deleteJob(it.id) }
-                                builtApk?.delete()
-                                val freed = com.orion.store.platform.PatchStorageCleaner.purgeAppCache(context, pkg)
-                                scope.launch {
-                                    val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
-                                    vm.snackbar.showSnackbar("Removed patched build" + if (freed > 0) " (freed ${freedMb}MB)" else "")
-                                }
+                                vm.removePatchedBuild(r.app, pkg)
                             },
                             leadingIcon = { Icon(Sym.Delete, null, tint = cs.error) }
                         )
@@ -407,6 +456,15 @@ private fun LibraryRow(vm: MainViewModel, r: MyAppRow, modifier: Modifier, picke
                     if (r.isInstalledNow) {
                         DropdownMenuItem({ Text("Uninstall") }, { menu = false; vm.uninstall(r.app) }, leadingIcon = { Icon(Sym.Delete, null) })
                     }
+
+                    DropdownMenuItem(
+                        text = { Text("Delete from My Apps", color = cs.error) },
+                        onClick = {
+                            menu = false
+                            vm.deleteFromMyApps(r.app, pkg)
+                        },
+                        leadingIcon = { Icon(Sym.DeleteOutline, null, tint = cs.error) }
+                    )
                 }
             }
         }

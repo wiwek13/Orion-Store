@@ -51,9 +51,11 @@ object MetaMorpheScraper {
 
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
-    // Memory caches for commit hashes and ETags to prevent unnecessary network re-fetches
-    private var cachedBundlesJson: String = ""
-    private var lastFetchTime: Long = 0L
+    private const val BUNDLES_CACHE_TTL_MS = 5 * 60 * 1000L
+
+    // Memory caches for fetched catalog JSON to prevent unnecessary network re-fetches
+    @Volatile private var cachedBundlesJson: String = ""
+    @Volatile private var lastFetchTime: Long = 0L
 
     /**
      * Resilient fetcher: tries primary endpoint with DoH client, falls back to GitHub Raw.
@@ -211,7 +213,7 @@ object MetaMorpheScraper {
 
         if (newRepos.isNotEmpty()) {
             for (r in newRepos) {
-                MorpheRepoStore.addRepo(r.name, r.url)
+                MorpheRepoStore.addRepo(r.name, r.url, r.description, r.isTrusted)
             }
         }
 
@@ -290,127 +292,57 @@ object MetaMorpheScraper {
 
     /**
      * Fetches and parses 590+ active bundles from bundles.json (primary) or GitHub Raw (fallback).
-     * Deduplicates repositories (at most one bundle per channel), filters archived repos,
+     * Deduplicates repositories (at most one bundle per channel per repo/name), filters archived repos,
      * and maps compatible packages & recommended versions.
      */
-    suspend fun scrapeAllBundles(): List<PatchBundle> = withContext(Dispatchers.IO) {
+    suspend fun scrapeAllBundles(force: Boolean = false): List<PatchBundle> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val freshText = if (!force && cachedBundlesJson.isNotBlank() && (now - lastFetchTime) < BUNDLES_CACHE_TTL_MS) {
+            cachedBundlesJson
+        } else {
+            val fetched = fetchResilientJson(BUNDLES_PRIMARY, BUNDLES_FALLBACK)
+            if (fetched.isNotBlank()) {
+                cachedBundlesJson = fetched
+                lastFetchTime = now
+            }
+            fetched
+        }
+
+        val parsed = if (freshText.isNotBlank()) parseBundlesJson(freshText) else emptyList()
+        if (parsed.isNotEmpty()) return@withContext parsed
+
+        // If bundles.json was empty, fall back to legacy data.js parser
         val list = mutableListOf<PatchBundle>()
-        val seenRepoKeys = mutableSetOf<String>()
-
         try {
-            val text = fetchResilientJson(BUNDLES_PRIMARY, BUNDLES_FALLBACK)
-            if (text.isNotBlank()) {
-                val element = json.parseToJsonElement(text)
-                val bundlesArr = when (element) {
-                    is JsonArray -> element
-                    is JsonObject -> element["bundles"]?.jsonArray ?: JsonArray(emptyList())
-                    else -> JsonArray(emptyList())
-                }
-
-                // Parse root compatibilities lookup
-                val compsArr = when (element) {
-                    is JsonObject -> element["compatibilities"]?.jsonArray ?: element["compatibility"]?.jsonArray
-                    else -> null
-                }
-                val parsedComps = ArrayList<Map<String, List<String>>>()
-                if (compsArr != null) {
-                    for (compElement in compsArr) {
-                        val pkgMap = mutableMapOf<String, List<String>>()
-                        when (compElement) {
-                            is JsonArray -> {
-                                for (item in compElement) {
-                                    if (item is JsonObject) {
-                                        val pkg = item["packageName"]?.jsonPrimitive?.contentOrNull
-                                        val targets = item["targets"]?.jsonArray
-                                        val versions = targets?.mapNotNull {
-                                            (it as? JsonObject)?.get("version")?.jsonPrimitive?.contentOrNull
-                                        } ?: emptyList()
-                                        if (pkg != null) pkgMap[pkg] = versions
-                                    }
-                                }
-                            }
-                            is JsonObject -> {
-                                for ((pkg, vers) in compElement) {
-                                    val list = (vers as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
-                                    pkgMap[pkg] = list
-                                }
-                            }
-                            else -> {}
-                        }
-                        parsedComps.add(pkgMap)
-                    }
-                }
+            val text = Net.text(LEGACY_DATA_URL, c = Net.browser)
+            if (text.isNotBlank() && "window.CATALOGUE =" in text) {
+                val jsonStr = text.substringAfter("window.CATALOGUE =").substringBeforeLast(";").trim()
+                val root = json.parseToJsonElement(jsonStr).jsonObject
+                val bundlesArr = root["bundles"]?.jsonArray ?: JsonArray(emptyList())
 
                 for (elem in bundlesArr) {
                     val obj = elem as? JsonObject ?: continue
-                    val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
-                    val url = obj["repositoryUrl"]?.jsonPrimitive?.contentOrNull
-                        ?: obj["url"]?.jsonPrimitive?.contentOrNull
-                        ?: "https://github.com/$id"
-                    val normKey = url.trimEnd('/').lowercase()
-
-                    val isPrerelease = obj["isPrerelease"]?.jsonPrimitive?.booleanOrNull ?: false
-                    val channelKey = "$normKey:${if (isPrerelease) "dev" else "stable"}"
-
-                    // Single bundle per channel per repo
-                    if (!seenRepoKeys.add(channelKey)) continue
-
-                    val nom = obj["name"]?.jsonPrimitive?.contentOrNull
-                        ?: obj["nom"]?.jsonPrimitive?.contentOrNull
-                        ?: id.substringAfterLast("/")
-                    val desc = obj["description"]?.jsonPrimitive?.contentOrNull
-                        ?: obj["desc"]?.jsonPrimitive?.contentOrNull
-                        ?: ""
-                    val version = obj["version"]?.jsonPrimitive?.contentOrNull
-                        ?: obj["v"]?.jsonPrimitive?.contentOrNull
-                        ?: "1.0.0"
-                    val date = obj["updatedAt"]?.jsonPrimitive?.contentOrNull
-                        ?: obj["d"]?.jsonPrimitive?.contentOrNull
-                        ?: ""
-                    val author = obj["author"]?.jsonPrimitive?.contentOrNull
-                        ?: id.substringBefore("/", "Community")
+                    val id = obj["id"]?.jsonPrimitive?.contentOrNull
+                        ?: obj["repo"]?.jsonPrimitive?.contentOrNull
+                        ?: continue
+                    val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: "https://github.com/$id"
+                    val nom = obj["nom"]?.jsonPrimitive?.contentOrNull ?: id.substringAfterLast("/")
+                    val desc = obj["desc"]?.jsonPrimitive?.contentOrNull ?: ""
+                    val version = obj["v"]?.jsonPrimitive?.contentOrNull ?: "1.0.0"
+                    val date = obj["d"]?.jsonPrimitive?.contentOrNull ?: ""
+                    val author = id.substringBefore("/", "Community")
 
                     val patchesArr = obj["patches"]?.jsonArray ?: JsonArray(emptyList())
                     val patches = mutableListOf<MorphePatch>()
 
                     for (pElem in patchesArr) {
                         val pObj = pElem as? JsonObject ?: continue
-                        val pName = pObj["name"]?.jsonPrimitive?.contentOrNull
-                            ?: pObj["n"]?.jsonPrimitive?.contentOrNull
-                            ?: continue
-                        val pDesc = pObj["description"]?.jsonPrimitive?.contentOrNull
-                            ?: pObj["d"]?.jsonPrimitive?.contentOrNull
+                        val pName = pObj["n"]?.jsonPrimitive?.contentOrNull ?: continue
+                        val pDesc = pObj["d"]?.jsonPrimitive?.contentOrNull ?: ""
+                        val pCategory = pObj["category"]?.jsonPrimitive?.contentOrNull?.trim()
+                            ?: pObj["c"]?.jsonPrimitive?.contentOrNull?.trim()
                             ?: ""
-
-                        // Parse compatible packages and versions
-                        val compPkgs = mutableListOf<String>()
-                        val compVers = mutableListOf<String>()
-
-                        val cpk = pObj["compatiblePackagesKey"]?.jsonPrimitive?.intOrNull
-                            ?: pObj["compatibilityKey"]?.jsonPrimitive?.intOrNull
-                        if (cpk != null && cpk in parsedComps.indices) {
-                            for ((pkg, vers) in parsedComps[cpk]) {
-                                compPkgs.add(pkg)
-                                compVers.addAll(vers)
-                            }
-                        }
-
-                        val compArray = pObj["compatiblePackages"]?.jsonArray ?: pObj["a"]?.jsonArray
-                        if (compArray != null) {
-                            for (cItem in compArray) {
-                                when (cItem) {
-                                    is JsonPrimitive -> cItem.contentOrNull?.let { compPkgs.add(it) }
-                                    is JsonObject -> {
-                                        val pkg = cItem["packageName"]?.jsonPrimitive?.contentOrNull
-                                            ?: cItem["pkg"]?.jsonPrimitive?.contentOrNull
-                                        if (pkg != null) compPkgs.add(pkg)
-                                        val vers = cItem["versions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
-                                        if (vers != null) compVers.addAll(vers)
-                                    }
-                                    else -> {}
-                                }
-                            }
-                        }
+                        val pApps = pObj["a"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
 
                         patches.add(
                             MorphePatch(
@@ -418,9 +350,9 @@ object MetaMorpheScraper {
                                 name = pName,
                                 description = pDesc,
                                 version = version,
-                                compatiblePackages = compPkgs,
-                                compatibleVersions = compVers,
-                                isUniversal = compPkgs.isEmpty()
+                                category = pCategory,
+                                compatiblePackages = pApps,
+                                isUniversal = pApps.isEmpty()
                             )
                         )
                     }
@@ -443,65 +375,166 @@ object MetaMorpheScraper {
             e.printStackTrace()
         }
 
-        // If bundles.json was empty, fall back to legacy data.js parser
-        if (list.isEmpty()) {
-            try {
-                val text = Net.text(LEGACY_DATA_URL, c = Net.browser)
-                if (text.isNotBlank() && "window.CATALOGUE =" in text) {
-                    val jsonStr = text.substringAfter("window.CATALOGUE =").substringBeforeLast(";").trim()
-                    val root = json.parseToJsonElement(jsonStr).jsonObject
-                    val bundlesArr = root["bundles"]?.jsonArray ?: JsonArray(emptyList())
+        list
+    }
 
-                    for (elem in bundlesArr) {
-                        val obj = elem as? JsonObject ?: continue
-                        val id = obj["id"]?.jsonPrimitive?.contentOrNull ?: continue
-                        val url = obj["url"]?.jsonPrimitive?.contentOrNull ?: "https://github.com/$id"
-                        val nom = obj["nom"]?.jsonPrimitive?.contentOrNull ?: id.substringAfterLast("/")
-                        val desc = obj["desc"]?.jsonPrimitive?.contentOrNull ?: ""
-                        val version = obj["v"]?.jsonPrimitive?.contentOrNull ?: "1.0.0"
-                        val date = obj["d"]?.jsonPrimitive?.contentOrNull ?: ""
-                        val author = id.substringBefore("/", "Community")
+    internal fun parseBundlesJson(text: String): List<PatchBundle> {
+        val list = mutableListOf<PatchBundle>()
+        val seenRepoKeys = mutableSetOf<String>()
 
-                        val patchesArr = obj["patches"]?.jsonArray ?: JsonArray(emptyList())
-                        val patches = mutableListOf<MorphePatch>()
-
-                        for (pElem in patchesArr) {
-                            val pObj = pElem as? JsonObject ?: continue
-                            val pName = pObj["n"]?.jsonPrimitive?.contentOrNull ?: continue
-                            val pDesc = pObj["d"]?.jsonPrimitive?.contentOrNull ?: ""
-                            val pApps = pObj["a"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
-
-                            patches.add(
-                                MorphePatch(
-                                    id = pName.lowercase().replace(" ", "-"),
-                                    name = pName,
-                                    description = pDesc,
-                                    version = version,
-                                    compatiblePackages = pApps,
-                                    isUniversal = pApps.isEmpty()
-                                )
-                            )
-                        }
-
-                        list.add(
-                            PatchBundle(
-                                id = id,
-                                name = nom,
-                                description = desc,
-                                version = version,
-                                author = author,
-                                repositoryUrl = url,
-                                releaseDate = date,
-                                patches = patches
-                            )
-                        )
-                    }
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
+        try {
+            val element = json.parseToJsonElement(text)
+            val bundlesArr = when (element) {
+                is JsonArray -> element
+                is JsonObject -> element["bundles"]?.jsonArray ?: JsonArray(emptyList())
+                else -> JsonArray(emptyList())
             }
+
+            // Parse root compatibilities lookup
+            val compsArr = when (element) {
+                is JsonObject -> element["compatibilities"]?.jsonArray ?: element["compatibility"]?.jsonArray
+                else -> null
+            }
+            val parsedComps = ArrayList<Map<String, List<String>>>()
+            if (compsArr != null) {
+                for (compElement in compsArr) {
+                    val pkgMap = mutableMapOf<String, List<String>>()
+                    when (compElement) {
+                        is JsonArray -> {
+                            for (item in compElement) {
+                                if (item is JsonObject) {
+                                    val pkg = item["packageName"]?.jsonPrimitive?.contentOrNull
+                                    val targets = item["targets"]?.jsonArray
+                                    val versions = targets?.mapNotNull {
+                                        (it as? JsonObject)?.get("version")?.jsonPrimitive?.contentOrNull
+                                    } ?: emptyList()
+                                    if (pkg != null) pkgMap[pkg] = versions
+                                }
+                            }
+                        }
+                        is JsonObject -> {
+                            for ((pkg, vers) in compElement) {
+                                val versList = (vers as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
+                                pkgMap[pkg] = versList
+                            }
+                        }
+                        else -> {}
+                    }
+                    parsedComps.add(pkgMap)
+                }
+            }
+
+            for (elem in bundlesArr) {
+                val obj = elem as? JsonObject ?: continue
+                val id = obj["id"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["repo"]?.jsonPrimitive?.contentOrNull
+                    ?: continue
+                val repoSlug = obj["repo"]?.jsonPrimitive?.contentOrNull
+                    ?: if (id.contains("/")) id else ""
+                val url = obj["repositoryUrl"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["url"]?.jsonPrimitive?.contentOrNull
+                    ?: if (repoSlug.isNotBlank()) "https://github.com/$repoSlug" else "https://github.com/$id"
+                val normKey = url.trimEnd('/').lowercase()
+
+                val isPrerelease = obj["isPrerelease"]?.jsonPrimitive?.booleanOrNull ?: false
+                val nom = obj["name"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["nom"]?.jsonPrimitive?.contentOrNull
+                    ?: id.substringAfterLast("/")
+                val channelKey = "$normKey:${nom.lowercase()}:${if (isPrerelease) "dev" else "stable"}"
+
+                // Single bundle per bundle-name & channel per repo
+                if (!seenRepoKeys.add(channelKey)) continue
+
+                val desc = obj["description"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["repoDescription"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["desc"]?.jsonPrimitive?.contentOrNull
+                    ?: ""
+                val version = obj["version"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["v"]?.jsonPrimitive?.contentOrNull
+                    ?: "1.0.0"
+                val date = obj["updatedAt"]?.jsonPrimitive?.contentOrNull
+                    ?: obj["d"]?.jsonPrimitive?.contentOrNull
+                    ?: ""
+                val author = obj["author"]?.jsonPrimitive?.contentOrNull
+                    ?: (if (repoSlug.contains("/")) repoSlug.substringBefore("/") else id.substringBefore("/", "Community"))
+
+                val patchesArr = obj["patches"]?.jsonArray ?: JsonArray(emptyList())
+                val patches = mutableListOf<MorphePatch>()
+
+                for (pElem in patchesArr) {
+                    val pObj = pElem as? JsonObject ?: continue
+                    val pName = pObj["name"]?.jsonPrimitive?.contentOrNull
+                        ?: pObj["n"]?.jsonPrimitive?.contentOrNull
+                        ?: continue
+                    val pDesc = pObj["description"]?.jsonPrimitive?.contentOrNull
+                        ?: pObj["d"]?.jsonPrimitive?.contentOrNull
+                        ?: ""
+                    val pCategory = pObj["category"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?: pObj["cat"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?: pObj["c"]?.jsonPrimitive?.contentOrNull?.trim()
+                        ?: ""
+
+                    // Parse compatible packages and versions
+                    val compPkgs = mutableListOf<String>()
+                    val compVers = mutableListOf<String>()
+
+                    val cpk = pObj["compatiblePackagesKey"]?.jsonPrimitive?.intOrNull
+                        ?: pObj["compatibilityKey"]?.jsonPrimitive?.intOrNull
+                    if (cpk != null && cpk in parsedComps.indices) {
+                        for ((pkg, vers) in parsedComps[cpk]) {
+                            compPkgs.add(pkg)
+                            compVers.addAll(vers)
+                        }
+                    }
+
+                    val compArray = pObj["compatiblePackages"]?.jsonArray ?: pObj["a"]?.jsonArray
+                    if (compArray != null) {
+                        for (cItem in compArray) {
+                            when (cItem) {
+                                is JsonPrimitive -> cItem.contentOrNull?.let { compPkgs.add(it) }
+                                is JsonObject -> {
+                                    val pkg = cItem["packageName"]?.jsonPrimitive?.contentOrNull
+                                        ?: cItem["pkg"]?.jsonPrimitive?.contentOrNull
+                                    if (pkg != null) compPkgs.add(pkg)
+                                    val vers = cItem["versions"]?.jsonArray?.mapNotNull { it.jsonPrimitive.contentOrNull }
+                                    if (vers != null) compVers.addAll(vers)
+                                }
+                                else -> {}
+                            }
+                        }
+                    }
+
+                    patches.add(
+                        MorphePatch(
+                            id = pName.lowercase().replace(" ", "-"),
+                            name = pName,
+                            description = pDesc,
+                            version = version,
+                            category = pCategory,
+                            compatiblePackages = compPkgs,
+                            compatibleVersions = compVers,
+                            isUniversal = compPkgs.isEmpty()
+                        )
+                    )
+                }
+
+                list.add(
+                    PatchBundle(
+                        id = if (repoSlug.isNotBlank()) repoSlug else id,
+                        name = nom,
+                        description = desc,
+                        version = version,
+                        author = author,
+                        repositoryUrl = url,
+                        releaseDate = date,
+                        patches = patches
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
 
-        list
+        return list
     }
 }

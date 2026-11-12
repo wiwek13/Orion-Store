@@ -223,7 +223,11 @@ class DownloadService : Service() {
             Downloads.state.collect { m ->
                 val active = m.values.filter { it.status == DlStatus.RUNNING }
                 if (active.isEmpty()) { ServiceCompat.stopForeground(this@DownloadService, ServiceCompat.STOP_FOREGROUND_REMOVE); stopSelf() }
-                else runCatching { NotificationManagerCompat.from(this@DownloadService).notify(ID, note(active.size, active.sumOf { it.progress } / active.size)) }
+                else if (android.os.Build.VERSION.SDK_INT < 33 || androidx.core.content.ContextCompat.checkSelfPermission(
+                        this@DownloadService,
+                        android.Manifest.permission.POST_NOTIFICATIONS
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) runCatching { NotificationManagerCompat.from(this@DownloadService).notify(ID, note(active.size, active.sumOf { it.progress } / active.size)) }
             }
         }
         return START_NOT_STICKY

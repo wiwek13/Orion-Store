@@ -233,14 +233,20 @@ object PatchStorageCleaner {
                 }
             }
 
-            // Also clean legacy temporary files in cache root
+            // Also clean legacy and temporary picker/merge/patch files in cache root
             val now = System.currentTimeMillis()
             context.cacheDir?.listFiles()?.forEach { f ->
                 val n = f.name.lowercase()
-                if (n.startsWith("source_") || n.startsWith("patched_") || n.startsWith("aligned_") || n.startsWith("signed_")) {
-                    if (now - f.lastModified() > SESSION_EXPIRY_MS) {
-                        f.deleteRecursively()
-                    }
+                val isTempFile = n.startsWith("source_") ||
+                    n.startsWith("patched_") ||
+                    n.startsWith("aligned_") ||
+                    n.startsWith("signed_") ||
+                    n.startsWith("picked_") ||
+                    n.startsWith("precheck_") ||
+                    n.startsWith("merged_") ||
+                    n.startsWith("cloned_")
+                if (isTempFile && (now - f.lastModified() > SESSION_EXPIRY_MS)) {
+                    f.deleteRecursively()
                 }
             }
         } catch (e: Exception) {

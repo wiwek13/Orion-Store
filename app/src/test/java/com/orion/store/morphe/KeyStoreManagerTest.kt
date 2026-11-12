@@ -77,7 +77,6 @@ class KeyStoreManagerTest {
         val tempDir = java.io.File(System.getProperty("java.io.tmpdir", "/tmp"), "morphe_stored_${System.currentTimeMillis()}")
         tempDir.mkdirs()
         val inputApk = java.io.File(tempDir, "input.apk")
-        val patchedApk = java.io.File(tempDir, "patched.apk")
         val alignedApk = java.io.File(tempDir, "aligned.apk")
         val signedApk = java.io.File(tempDir, "signed.apk")
 
@@ -103,15 +102,7 @@ class KeyStoreManagerTest {
         }
 
         val engine = com.orion.store.morphe.engine.MorpheEngineImpl()
-        val res = engine.applyPatches(
-            inputApk = inputApk,
-            selectedPatches = emptyList(),
-            options = mapOf("packageName" to "com.test.sample", "bundleName" to "TestBundle"),
-            outputApk = patchedApk
-        ) { _, _ -> }
-
-        assertTrue("Patch apply should succeed", res is com.orion.store.morphe.engine.PatchResult.Success)
-        assertTrue("Zipalign should succeed", engine.zipalign(patchedApk, alignedApk))
+        assertTrue("Zipalign should succeed", engine.zipalign(inputApk, alignedApk))
         assertTrue("Signing should succeed", engine.signApk(alignedApk, signedApk, KeyStoreManager.DEFAULT_ALIAS))
 
         java.util.zip.ZipFile(signedApk).use { zip ->
@@ -125,5 +116,15 @@ class KeyStoreManagerTest {
         }
 
         tempDir.deleteRecursively()
+    }
+
+    @Test
+    fun `test persistent keystore enumerates newly generated keys and fingerprints`() {
+        KeyStoreManager.generateNewKey("test-persistent-second")
+        val keys = KeyStoreManager.getKnownKeys()
+        assertTrue("Known keys should include default alias", keys.any { it.alias == KeyStoreManager.DEFAULT_ALIAS })
+        assertTrue("Known keys should include newly generated alias", keys.any { it.alias == "test-persistent-second" })
+        val digests = KeyStoreManager.getKeySha256Fingerprints()
+        assertTrue("Should expose at least 2 SHA-256 fingerprints", digests.size >= 2)
     }
 }

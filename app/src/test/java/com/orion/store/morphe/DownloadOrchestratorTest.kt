@@ -232,4 +232,142 @@ class DownloadOrchestratorTest {
         assertTrue("Closest xxhdpi DPI must be selected", picked.contains("config.xxhdpi.apk"))
         assertFalse("Non-matching xxxhdpi DPI must be excluded", picked.contains("config.xxxhdpi.apk"))
     }
+
+    @Test
+    fun `test split-requiring base APK without splits is refused from cache and rejected by hasLocalBaseApk`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pkg = "com.test.incomplete.splitapp"
+        val cacheDir = DownloadOrchestrator.getBaseCacheDir(context, pkg)
+        cacheDir.deleteRecursively()
+
+        val tmpDir = File("build/test_temp/split_reject").apply { mkdirs() }
+        val splitRequiringBase = File(tmpDir, "base.apk")
+        // Build minimal valid binary AXML declaring <manifest requiredSplitTypes="base__density">
+        val s0 = "requiredSplitTypes".toByteArray(Charsets.UTF_8)
+        val s1 = "base__density".toByteArray(Charsets.UTF_8)
+        val poolStrBytes = java.io.ByteArrayOutputStream().apply {
+            write(s0.size); write(s0.size); write(s0); write(0)
+            val s1Off = size()
+            write(s1.size); write(s1.size); write(s1); write(0)
+            while (size() % 4 != 0) write(0)
+        }.toByteArray()
+        val s1Off = 2 + s0.size + 1
+        val poolSize = 28 + 8 + poolStrBytes.size
+        val elemSize = 56
+        val totalAxml = 8 + poolSize + elemSize
+        val axml = java.nio.ByteBuffer.allocate(totalAxml).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+            // Root AXML chunk
+            putShort(0x0003); putShort(8); putInt(totalAxml)
+            // String pool chunk
+            putShort(0x0001); putShort(28); putInt(poolSize)
+            putInt(2); putInt(0); putInt(0x100); putInt(36); putInt(0)
+            putInt(0); putInt(s1Off)
+            put(poolStrBytes)
+            // START_ELEMENT (<manifest requiredSplitTypes="base__density">)
+            putShort(0x0102); putShort(16); putInt(elemSize); putInt(1); putInt(-1)
+            putInt(-1); putInt(0); putShort(20); putShort(20); putShort(1); putShort(0); putShort(0); putShort(0)
+            // Attr: ns=-1, name=0, rawValue=1, size=8, res0=0, type=3 (STRING), data=1
+            putInt(-1); putInt(0); putInt(1); putShort(8); put(0); put(3); putInt(1)
+        }.array()
+        ZipOutputStream(FileOutputStream(splitRequiringBase)).use { zos ->
+            zos.putNextEntry(ZipEntry("AndroidManifest.xml"))
+            zos.write(axml)
+            zos.closeEntry()
+            val pad = ByteArray(70_000).apply { java.util.Random(7).nextBytes(this) }
+            zos.putNextEntry(ZipEntry("assets/pad.bin"))
+            zos.write(pad)
+            zos.closeEntry()
+        }
+
+        assertTrue("apkRequiresSplits must detect splits requirement", DownloadOrchestrator.apkRequiresSplits(splitRequiringBase))
+
+        // cacheResolvedApk must refuse caching without companion splits
+        DownloadOrchestrator.cacheResolvedApk(
+            context = context,
+            packageName = pkg,
+            resolved = DownloadOrchestrator.ResolvedApk(
+                baseApk = splitRequiringBase,
+                splits = emptyList(),
+                sourceProvider = "Test",
+                resolvedVersion = "1.0.0"
+            )
+        )
+        assertFalse("Incomplete split base must NOT be cached", DownloadOrchestrator.hasLocalBaseApk(context, pkg))
+
+        // Even if a broken bundle_* dir exists without splits/, hasLocalBaseApk must reject it
+        val brokenBundle = File(cacheDir, "bundle_1.0.0").apply { mkdirs() }
+        splitRequiringBase.copyTo(File(brokenBundle, "base.apk"), overwrite = true)
+        assertFalse("Poisoned split-less bundle dir must return false in hasLocalBaseApk", DownloadOrchestrator.hasLocalBaseApk(context, pkg))
+
+        tmpDir.deleteRecursively()
+        cacheDir.deleteRecursively()
+    }
+
+    @Test
+    fun `test deleteJobsForPackage removes all jobs for package`() {
+        val pkg = "com.test.cleanup.pkg"
+        com.orion.store.morphe.store.JobStore.enqueue(
+            PatchJobParams(id = "cleanup-job-1", packageName = pkg, appName = "Cleanup App")
+        )
+        com.orion.store.morphe.store.JobStore.enqueue(
+            PatchJobParams(id = "cleanup-job-2", packageName = pkg, appName = "Cleanup App")
+        )
+        assertTrue(
+            "Expected at least 2 jobs for $pkg",
+            com.orion.store.morphe.store.JobStore.jobs.value.count { it.params.packageName == pkg } >= 2
+        )
+        com.orion.store.morphe.store.JobStore.deleteJobsForPackage(pkg)
+        assertEquals(0, com.orion.store.morphe.store.JobStore.jobs.value.count { it.params.packageName == pkg })
+    }
+
+    @Test
+    fun `test resolveFromBaseCache does not fallback to mismatched version when specific version requested`() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val pkg = "com.test.exactver"
+        val tmpDir = File("build/test_temp/exact_ver").apply {
+            deleteRecursively()
+            mkdirs()
+        }
+        val apk = File(tmpDir, "source.apk")
+        createValidDummyApk(apk)
+        DownloadOrchestrator.cacheBaseApk(context, pkg, "1.0.0", apk)
+
+        val mismatched = DownloadOrchestrator.resolveFromBaseCache(context, pkg, "2.0.0", File(tmpDir, "out1"))
+        assertEquals("Mismatched requested version must not reuse cached 1.0.0", null, mismatched)
+
+        val matched = DownloadOrchestrator.resolveFromBaseCache(context, pkg, "1.0.0", File(tmpDir, "out2"))
+        assertNotNull("Exact cached version should resolve cleanly", matched)
+        assertEquals("1.0.0", matched!!.resolvedVersion)
+
+        tmpDir.deleteRecursively()
+        DownloadOrchestrator.getBaseCacheDir(context, pkg).deleteRecursively()
+    }
+
+    @Test
+    fun `test parseApkPureVersionCodeFromHtml extracts versionCode across attribute orders`() {
+        val htmlOrderA = """
+            <a class="ver_download_link" data-dt-version="455.0.0.51.72" data-dt-versioncode="386113969" href="/dl">Latest</a>
+            <a class="ver_download_link" data-dt-version="454.0.0.54.77" data-dt-versioncode="386014758" href="/dl2">Target</a>
+        """.trimIndent()
+        assertEquals(386014758L, DownloadOrchestrator.parseApkPureVersionCodeFromHtml(htmlOrderA, "454.0.0.54.77"))
+        assertEquals(386113969L, DownloadOrchestrator.parseApkPureVersionCodeFromHtml(htmlOrderA, "v455.0.0.51.72"))
+        assertEquals(null, DownloadOrchestrator.parseApkPureVersionCodeFromHtml(htmlOrderA, "453.0.0.1.0"))
+
+        val htmlOrderB = """
+            <div data-dt-version-code="386014758" data-dt-version="454.0.0.54.77">Instagram</div>
+        """.trimIndent()
+        assertEquals(386014758L, DownloadOrchestrator.parseApkPureVersionCodeFromHtml(htmlOrderB, "454.0.0.54.77"))
+    }
+
+    @Test
+    fun `test isSpecificVersionRequest and versionsMatch`() {
+        assertFalse(DownloadOrchestrator.isSpecificVersionRequest(""))
+        assertFalse(DownloadOrchestrator.isSpecificVersionRequest("Recommended"))
+        assertFalse(DownloadOrchestrator.isSpecificVersionRequest("latest"))
+        assertFalse(DownloadOrchestrator.isSpecificVersionRequest("Local"))
+        assertTrue(DownloadOrchestrator.isSpecificVersionRequest("454.0.0.54.77"))
+
+        assertTrue(DownloadOrchestrator.versionsMatch("v454.0.0.54.77", "454.0.0.54.77"))
+        assertFalse(DownloadOrchestrator.versionsMatch("455.0.0.51.72", "454.0.0.54.77"))
+    }
 }

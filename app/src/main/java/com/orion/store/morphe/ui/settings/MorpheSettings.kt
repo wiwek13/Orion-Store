@@ -146,6 +146,52 @@ fun MorpheSettingsPage(
                             }
                         )
                     }
+
+                    HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.5f))
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Skip failing patches", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Continue building if individual non-critical patches fail fingerprint matching instead of aborting the job",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = s.skipFailingPatches,
+                            onCheckedChange = { checked ->
+                                vm.haptic(H.SELECTION)
+                                vm.set { it.copy(skipFailingPatches = checked) }
+                            }
+                        )
+                    }
+
+                    HorizontalDivider(color = cs.outlineVariant.copy(alpha = 0.5f))
+
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Allow nearest APK version", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "Fall back to latest available APK if providers do not host the exact recommended version",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = cs.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = s.allowNearestApkVersion,
+                            onCheckedChange = { checked ->
+                                vm.haptic(H.SELECTION)
+                                vm.set { it.copy(allowNearestApkVersion = checked) }
+                            }
+                        )
+                    }
                 }
             }
 

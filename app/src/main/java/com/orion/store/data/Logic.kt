@@ -438,20 +438,21 @@ data class MyAppRow(
 ) {
     val savedFile get() = readyFile ?: cleanupFile ?: libraryFile
     val primaryAction get() = when {
-        status == "downloading" -> "view"; status == "ready" -> "install"
+        status == "downloading" || status == "patching" -> "view"; status == "ready" -> "install"
         isPatched && hasUpdate -> "repatch"
         hasUpdate -> "update"
         isInstalledNow && hasSavedApk -> "delete"; libraryStatus == "downloaded" -> if (hasSavedApk) "install" else "download"; else -> "view"
     }
     val statusLabel get() = when (status) {
         "downloading" -> "${Math.round(progress)}%"
+        "patching" -> "Patching ${Math.round(progress)}%"
         "ready" -> "Ready to install"
         "update" -> if (isPatched) "Patch update available" else "Update available"
-        "installed" -> if (isPatched) {
+        "installed" -> if (isPatched && isInstalledNow) {
             val count = patchedApp?.appliedPatches?.size ?: 0
-            if (count > 0) "Patched ($count patches)" else "Patched"
-        } else if (isInstalledNow) "Installed v$installedVersion" else "Installed previously"
-        else -> if (hasSavedApk) "APK saved" else "Downloaded"
+            if (count > 0) "Patched · $count patches" else "Patched"
+        } else if (isInstalledNow) "Installed v$installedVersion" else if (isPatched) "Patched build removed" else "Installed previously"
+        else -> if (hasSavedApk) "APK saved" else if (isPatched) "Patched APK ready" else "Downloaded"
     }
     val versionDetail get() = when {
         isPatched && hasUpdate -> {
@@ -465,29 +466,82 @@ data class MyAppRow(
     }
 }
 
-fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: Set<String>): List<MyAppRow> {
-    val patchedList = com.orion.store.morphe.store.PatchedAppStore.apps.value
+fun buildMyAppsRows(
+    apps: List<AppItem>,
+    s: Settings,
+    d: DataState,
+    updateIds: Set<String>,
+    patchedApps: List<com.orion.store.morphe.model.PatchedApp> = com.orion.store.morphe.store.PatchedAppStore.apps.value,
+    patchJobs: List<com.orion.store.morphe.model.PatchJob> = com.orion.store.morphe.store.JobStore.jobs.value
+): List<MyAppRow> {
+    val patchedByPkg = HashMap<String, com.orion.store.morphe.model.PatchedApp>(patchedApps.size * 2)
+    for (p in patchedApps) patchedByPkg[p.packageName] = p
+
+    val activeJobByPkg = HashMap<String, com.orion.store.morphe.model.PatchJob>(patchJobs.size)
+    for (job in patchJobs) {
+        if (job.stage.isActive) {
+            activeJobByPkg[job.params.effectivePackageName()] = job
+        }
+    }
+
+    val coveredKeys = HashSet<String>(apps.size * 2)
     val baseRows = apps.mapNotNull { a ->
-        val lib = d.appLibrary[a.id]; val inst = s.installedVersions[a.id]?.ifEmpty { null }
+        val lib = d.appLibrary[a.id]
+        val inst = s.installedVersions[a.id]?.ifEmpty { null }
+            ?: a.packageName?.let { s.installedVersions[it]?.ifEmpty { null } }
         val ready = d.readyToInstall[a.id]; val cleanup = d.pendingCleanup[a.id]; val key = d.activeDownloads[a.id]
         val saved = ready != null || cleanup != null || lib?.fileName != null
-        val patched = patchedList.firstOrNull { it.packageName == a.packageName || it.packageName == a.id }
+        val patched = patchedByPkg[a.id] ?: a.packageName?.let { patchedByPkg[it] }
         val isPatched = patched != null
+        val activeJob = activeJobByPkg[a.id] ?: a.packageName?.let { activeJobByPkg[it] }
+        val hasActiveJob = activeJob != null
         val patchUpd = patched?.availableAppUpdate != null || patched?.availablePatchUpdate != null
-        val upd = a.id in updateIds || patchUpd; val dl = key != null; val now = inst != null || patched != null
-        if (lib == null && !now && !saved && !dl && !upd && !isPatched) return@mapNotNull null
-        if (!dl && ready == null && !isManaged(a.id, s) && !isPatched) return@mapNotNull null
-        val status = when { dl -> "downloading"; ready != null -> "ready"; upd -> "update"; now || lib?.status == "installed" -> "installed"; else -> "downloaded" }
-        MyAppRow(a, status, inst ?: patched?.installedVersion, s.lastRemoteVersions[a.id] ?: patched?.targetVersion, ready, cleanup?.fileName, lib?.fileName, key, saved, upd, now, lib?.status,
-            d.downloadProgress[a.id] ?: 0f, lib?.downloadedAt ?: cleanup?.timestamp ?: patched?.installedAt ?: 0, lib?.installedAt ?: patched?.installedAt,
-            isPatched = isPatched, patchedApp = patched)
+        val upd = a.id in updateIds || patchUpd; val dl = key != null; val now = inst != null
+        if (lib == null && !now && !saved && !dl && !upd && !isPatched && !hasActiveJob) return@mapNotNull null
+        if (!dl && ready == null && !hasActiveJob && !isManaged(a.id, s) && !isPatched) return@mapNotNull null
+        coveredKeys.add(a.id)
+        a.packageName?.let { coveredKeys.add(it) }
+        val status = when {
+            activeJob != null -> "patching"
+            dl -> "downloading"
+            ready != null -> "ready"
+            upd -> "update"
+            now -> "installed"
+            saved -> "downloaded"
+            lib?.status == "installed" -> "installed"
+            else -> "downloaded"
+        }
+        MyAppRow(
+            app = a,
+            status = status,
+            installedVersion = inst,
+            lastRemoteVersion = activeJob?.params?.targetVersion?.takeIf { it.isNotBlank() }
+                ?: s.lastRemoteVersions[a.id]
+                ?: patched?.targetVersion,
+            readyFile = ready,
+            cleanupFile = cleanup?.fileName,
+            libraryFile = lib?.fileName,
+            downloadKey = key,
+            hasSavedApk = saved,
+            hasUpdate = upd,
+            isInstalledNow = now,
+            libraryStatus = lib?.status,
+            progress = activeJob?.progress?.toFloat() ?: (d.downloadProgress[a.id] ?: 0f),
+            downloadedAt = maxOf(activeJob?.createdAt ?: 0L, lib?.downloadedAt ?: cleanup?.timestamp ?: patched?.installedAt ?: 0L),
+            installedAt = lib?.installedAt ?: patched?.installedAt,
+            isPatched = isPatched,
+            patchedApp = patched
+        )
     }.toMutableList()
 
-    // Add any patched apps not in standard catalog
-    val existingIds = apps.map { it.id }.toSet()
-    for (p in patchedList) {
-        if (p.packageName !in existingIds && baseRows.none { it.app.packageName == p.packageName || it.app.id == p.packageName }) {
+    // Add any patched apps not already matched to a catalog row
+    for (p in patchedApps) {
+        if (p.packageName !in coveredKeys) {
+            coveredKeys.add(p.packageName)
             val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(p.packageName)
+            val inst = s.installedVersions[p.packageName]?.ifEmpty { null }
+            val isInstalledNow = inst != null
+            val activeJob = activeJobByPkg[p.packageName]
             val fakeApp = AppItem(
                 id = p.packageName,
                 packageName = p.packageName,
@@ -497,26 +551,74 @@ fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: S
                 author = "Morphe",
                 description = "Locally patched application (${p.appliedPatches.size} patches applied)."
             )
-            val patchUpd = p.availableAppUpdate != null || p.availablePatchUpdate != null
+            val patchUpd = isInstalledNow && (p.availableAppUpdate != null || p.availablePatchUpdate != null)
             baseRows.add(
                 MyAppRow(
                     app = fakeApp,
-                    status = if (patchUpd) "update" else "installed",
-                    installedVersion = p.installedVersion,
-                    lastRemoteVersion = p.availableAppUpdate ?: p.targetVersion,
+                    status = when {
+                        activeJob != null -> "patching"
+                        patchUpd -> "update"
+                        isInstalledNow -> "installed"
+                        else -> "downloaded"
+                    },
+                    installedVersion = inst ?: p.installedVersion,
+                    lastRemoteVersion = activeJob?.params?.targetVersion?.takeIf { it.isNotBlank() }
+                        ?: p.availableAppUpdate
+                        ?: p.targetVersion,
                     readyFile = null,
                     cleanupFile = null,
                     libraryFile = null,
                     downloadKey = null,
                     hasSavedApk = false,
                     hasUpdate = patchUpd,
-                    isInstalledNow = true,
-                    libraryStatus = "installed",
-                    progress = 0f,
-                    downloadedAt = p.installedAt,
-                    installedAt = p.installedAt,
+                    isInstalledNow = isInstalledNow,
+                    libraryStatus = if (isInstalledNow) "installed" else "downloaded",
+                    progress = activeJob?.progress?.toFloat() ?: 0f,
+                    downloadedAt = maxOf(activeJob?.createdAt ?: 0L, p.installedAt),
+                    installedAt = if (isInstalledNow) p.installedAt else null,
                     isPatched = true,
                     patchedApp = p
+                )
+            )
+        }
+    }
+
+    // Add any active/queued Morphe patch jobs that don't yet have a catalog or PatchedAppStore row
+    for ((effPkg, job) in activeJobByPkg) {
+        if (effPkg !in coveredKeys) {
+            coveredKeys.add(effPkg)
+            val morpheApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(effPkg)
+                ?: com.orion.store.morphe.store.MorpheCatalogRepository.getApp(job.params.packageName)
+            val inst = s.installedVersions[effPkg]?.ifEmpty { null }
+            val isInstalledNow = inst != null
+            val fakeApp = AppItem(
+                id = effPkg,
+                packageName = effPkg,
+                name = job.params.appName.ifBlank { morpheApp?.name ?: effPkg },
+                icon = morpheApp?.iconUrl.orEmpty(),
+                category = morpheApp?.category ?: "Patched",
+                author = "Morphe",
+                description = "Patching in progress (${job.params.selectedPatchIds.size} patches selected)."
+            )
+            baseRows.add(
+                MyAppRow(
+                    app = fakeApp,
+                    status = "patching",
+                    installedVersion = inst,
+                    lastRemoteVersion = job.params.targetVersion.ifBlank { null },
+                    readyFile = null,
+                    cleanupFile = null,
+                    libraryFile = null,
+                    downloadKey = null,
+                    hasSavedApk = false,
+                    hasUpdate = false,
+                    isInstalledNow = isInstalledNow,
+                    libraryStatus = if (isInstalledNow) "installed" else null,
+                    progress = job.progress.toFloat(),
+                    downloadedAt = job.createdAt,
+                    installedAt = null,
+                    isPatched = false,
+                    patchedApp = null
                 )
             )
         }
@@ -528,9 +630,11 @@ fun buildMyAppsRows(apps: List<AppItem>, s: Settings, d: DataState, updateIds: S
 fun myAppsFilterOrder(saved: List<String>) = saved.mapNotNull { n -> MyAppsFilter.entries.firstOrNull { it.name == n } }.distinct().let { it + (MyAppsFilter.entries - it.toSet()) }
 
 fun MyAppRow.matches(f: MyAppsFilter) = when (f) {
-    MyAppsFilter.ALL -> true; MyAppsFilter.INSTALLED -> status == "installed" || hasUpdate
-    MyAppsFilter.DOWNLOADED -> status in setOf("downloading", "ready", "downloaded"); MyAppsFilter.UPDATES -> hasUpdate
-    MyAppsFilter.PATCHED -> isPatched
+    MyAppsFilter.ALL -> true
+    MyAppsFilter.INSTALLED -> status == "installed" || hasUpdate || (isInstalledNow && status == "patching")
+    MyAppsFilter.DOWNLOADED -> status in setOf("downloading", "patching", "ready", "downloaded")
+    MyAppsFilter.UPDATES -> hasUpdate
+    MyAppsFilter.PATCHED -> isPatched || status == "patching"
 }
 
 fun MyAppRow.matchesQuery(q: String) = q.isBlank() || q.trim().lowercase().let { t -> listOfNotNull(app.name, app.author, app.category, app.packageName).any { t in it.lowercase() } }

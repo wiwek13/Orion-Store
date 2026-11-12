@@ -7,7 +7,9 @@ import com.orion.store.morphe.model.PatchJobParams
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -51,6 +53,7 @@ object JobStore {
                             File(sDir, "patched_output.apk").takeIf { it.exists() && it.length() > 50_000 }
                         }?.maxByOrNull { it.lastModified() }
 
+                        val fromStorageManager = com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(job.params.appName, job.params.packageName)
                         val publicDownloads = com.orion.store.platform.Downloads.dir()
                         val cleanAppName = job.params.appName.replace(" ", "_")
                         val foundInDownloads = publicDownloads.listFiles()?.firstOrNull { f ->
@@ -61,10 +64,25 @@ object JobStore {
                             ) && f.length() > 50_000
                         }
 
-                        val target = foundInSession ?: foundInDownloads
+                        val target = fromStorageManager ?: foundInSession ?: foundInDownloads
                         if (target != null) {
                             job.copy(outputApkPath = target.absolutePath)
                         } else job
+                    } else job
+                }.map { job ->
+                    // Any active stage loaded from disk belongs to a dead process; unstick it immediately.
+                    if (job.stage.isActive) {
+                        val hasOutput = job.outputApkPath?.let { File(it).let { f -> f.exists() && f.length() > 0 } } == true
+                        if (job.stage == JobStage.INSTALLING && hasOutput) {
+                            job.copy(
+                                stage = JobStage.SUCCEEDED,
+                                progress = 100,
+                                stageMessage = "Patched build ready (tap Install Built APK)",
+                                failureReason = null
+                            )
+                        } else {
+                            job.failed("Previous build session was interrupted")
+                        }
                     } else job
                 }
 
@@ -76,19 +94,57 @@ object JobStore {
         }
     }
 
-    private fun saveToDisk() {
+    private val ioScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+    private val saveRequests = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val writeLock = Any()
+
+    init {
+        ioScope.launch {
+            @OptIn(kotlinx.coroutines.FlowPreview::class)
+            saveRequests.debounce(300L).collect {
+                synchronized(writeLock) {
+                    saveToDiskNow()
+                }
+            }
+        }
+    }
+
+    private fun saveToDisk(flushNow: Boolean = false) {
+        if (flushNow) {
+            ioScope.launch {
+                synchronized(writeLock) {
+                    saveToDiskNow()
+                }
+            }
+        } else {
+            saveRequests.tryEmit(Unit)
+        }
+    }
+
+    private fun saveToDiskNow() {
         try {
             val file = storageFile
+            file.parentFile?.mkdirs()
             val text = json.encodeToString(_jobs.value)
-            file.writeText(text)
+            val atomic = android.util.AtomicFile(file)
+            val stream = atomic.startWrite()
+            try {
+                stream.write(text.toByteArray(Charsets.UTF_8))
+                atomic.finishWrite(stream)
+            } catch (e: Exception) {
+                atomic.failWrite(stream)
+                throw e
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
 
-    private fun recalculateActive() {
+    private fun recalculateActive(flushNow: Boolean = true) {
         _activeCount.value = _jobs.value.count { it.stage.isActive }
-        saveToDisk()
+        saveToDisk(flushNow = flushNow)
     }
 
     fun enqueue(params: PatchJobParams): PatchJob {
@@ -113,16 +169,21 @@ object JobStore {
     }
 
     fun updateJob(updated: PatchJob) {
+        val capped = if (updated.logs.size > 300) {
+            updated.copy(logs = updated.logs.takeLast(300))
+        } else {
+            updated
+        }
         _jobs.update { list ->
-            if (updated.stage == JobStage.SUCCEEDED) {
+            if (capped.stage == JobStage.SUCCEEDED) {
                 // When an app succeeds, prune any older failed jobs for this package
-                list.filterNot { it.id != updated.id && it.params.packageName == updated.params.packageName && it.stage == JobStage.FAILED }
-                    .map { if (it.id == updated.id) updated else it }
+                list.filterNot { it.id != capped.id && it.params.packageName == capped.params.packageName && it.stage == JobStage.FAILED }
+                    .map { if (it.id == capped.id) capped else it }
             } else {
-                list.map { if (it.id == updated.id) updated else it }
+                list.map { if (it.id == capped.id) capped else it }
             }
         }
-        recalculateActive()
+        recalculateActive(flushNow = capped.stage.isTerminal)
     }
 
     fun cancelJob(id: String) {
@@ -178,6 +239,11 @@ object JobStore {
 
     fun deleteJob(id: String) {
         _jobs.update { list -> list.filterNot { it.id == id } }
+        recalculateActive()
+    }
+
+    fun deleteJobsForPackage(packageName: String) {
+        _jobs.update { list -> list.filterNot { it.params.packageName == packageName } }
         recalculateActive()
     }
 

@@ -65,4 +65,21 @@ class PatchStorageCleanerTest {
         val sizeMb = PatchStorageCleaner.getPatcherCacheSizeMb(context)
         assertEquals(2L, sizeMb)
     }
+
+    @Test
+    fun testSweepExpiredSessionsDeletesPickedMergedAndClonedTempFiles() {
+        val stalePicked = File(context.cacheDir, "picked_test.apk").apply { writeBytes(ByteArray(128)) }
+        val staleMerged = File(context.cacheDir, "merged_test.apk").apply { writeBytes(ByteArray(128)) }
+        val freshCloned = File(context.cacheDir, "cloned_fresh.apk").apply { writeBytes(ByteArray(128)) }
+        val twoHoursAgo = System.currentTimeMillis() - 2 * 3600_000L
+        stalePicked.setLastModified(twoHoursAgo)
+        staleMerged.setLastModified(twoHoursAgo)
+
+        PatchStorageCleaner.sweepExpiredSessions(context)
+
+        assertFalse("Stale picked_* temp file should be swept", stalePicked.exists())
+        assertFalse("Stale merged_* temp file should be swept", staleMerged.exists())
+        assertTrue("Fresh cloned_* temp file should be retained", freshCloned.exists())
+        freshCloned.delete()
+    }
 }

@@ -98,7 +98,7 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                 Button(
                     onClick = {
                         vm.haptic(H.MEDIUM)
-                        vm.navTo(Tab.PATCH_STUDIO)
+                        vm.navTo(Tab.ANDROID)
                     },
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                 ) {
@@ -134,7 +134,7 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                         )
                         Spacer(Modifier.height(4.dp))
                         Text(
-                            text = "Use Patch Studio to apply community patches to your favorite apps.",
+                            text = "Browse Orion Store to select any app and customize its patches.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = cs.onSurfaceVariant
                         )
@@ -142,10 +142,10 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                         Button(
                             onClick = {
                                 vm.haptic(H.LIGHT)
-                                vm.navTo(Tab.PATCH_STUDIO)
+                                vm.navTo(Tab.ANDROID)
                             }
                         ) {
-                            Text("Open Patch Studio")
+                            Text("Browse Store")
                         }
                     }
                 }
@@ -161,15 +161,24 @@ fun MyPatchedAppsTab(vm: MainViewModel) {
                             vm = vm,
                             onRepatch = {
                                 vm.haptic(H.MEDIUM)
-                                vm.navTo(Tab.PATCH_STUDIO)
+                                val catalogApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(app.packageName)
+                                    ?: com.orion.store.morphe.store.MorpheCatalogApp(
+                                        packageName = app.packageName,
+                                        name = app.appName,
+                                        compatibleVersions = listOfNotNull(app.targetVersion.takeIf { it.isNotBlank() }),
+                                        bundleNames = listOfNotNull(app.patchBundleId.takeIf { it.isNotBlank() })
+                                    )
+                                vm.openMorpheInstall(catalogApp)
                             },
                             onRemove = {
                                 vm.haptic(H.LIGHT)
                                 PatchedAppStore.removeApp(app.packageName)
-                                val freed = PatchStorageCleaner.purgeAppCache(context, app.packageName)
+                                val freedStorage = com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.appName, app.packageName)
+                                val freedCache = PatchStorageCleaner.purgeAppCache(context, app.packageName)
+                                val freed = freedStorage + freedCache
                                 scope.launch {
                                     val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
-                                    vm.snackbar.showSnackbar("Untracked ${app.appName} and cleared cache" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+                                    vm.snackbar.showSnackbar("Untracked ${app.appName} and cleared storage" + if (freed > 0) " (freed ${freedMb}MB)" else "")
                                 }
                             }
                         )
@@ -192,6 +201,19 @@ private fun PatchedAppCard(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var expanded by remember { mutableStateOf(false) }
+
+    val foundFile = remember(app.appName, app.packageName) {
+        com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(app.appName, app.packageName)
+            ?: runCatching {
+                val downloads = com.orion.store.platform.Downloads.dir()
+                val cleanAppName = app.appName.replace(" ", "_")
+                downloads.listFiles()?.firstOrNull { f ->
+                    f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
+                        (f.name.contains(app.packageName, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true)) &&
+                        f.length() > 0
+                }
+            }.getOrNull()
+    }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -311,13 +333,7 @@ private fun PatchedAppCard(
                     OutlinedButton(
                         onClick = {
                             vm.haptic(H.LIGHT)
-                            val cleanAppName = app.appName.replace(" ", "_")
-                            val downloads = com.orion.store.platform.Downloads.dir()
-                            val foundFile = downloads.listFiles()?.firstOrNull { f ->
-                                f.isFile && f.name.startsWith("Patched_", ignoreCase = true) &&
-                                    (f.name.contains(app.packageName, ignoreCase = true) || f.name.contains(cleanAppName, ignoreCase = true))
-                            }
-                            vm.showInFolder(foundFile ?: downloads)
+                            vm.showInFolder(foundFile ?: com.orion.store.platform.OrionStorageManager.getAppDir(app.appName, app.packageName))
                         },
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                         shapes = ButtonDefaults.shapes()
@@ -325,6 +341,22 @@ private fun PatchedAppCard(
                         Icon(Sym.FolderOpen, null, Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text("Show in Folder", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    if (foundFile != null) {
+                        FilledTonalButton(
+                            onClick = {
+                                vm.haptic(H.LIGHT)
+                                val dummyApp = com.orion.store.data.AppItem(id = app.packageName, name = app.appName)
+                                vm.installFile(dummyApp, foundFile.absolutePath)
+                            },
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            shapes = ButtonDefaults.shapes()
+                        ) {
+                            Icon(Sym.FileDownload, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Install", style = MaterialTheme.typography.labelSmall)
+                        }
                     }
 
                     FilledTonalButton(

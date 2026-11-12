@@ -140,10 +140,11 @@ private fun Home(vm: MainViewModel) {
                 containerColor = Color.Transparent,
             ) { pad ->
                 // Status bar is hidden; its slot is kept so the header clears the camera cutout, and content scrolls up through it.
-                val top = WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding()
+                val top = maxOf(WindowInsets.statusBarsIgnoringVisibility.asPaddingValues().calculateTopPadding(), pad.calculateTopPadding())
                 // A top dock floats over the first row, so the content starts under it (scaled like the dock itself)
                 val dockH = 80.dp * s.bottomNavScale.coerceIn(.8f, 1.2f)
-                val inner = PaddingValues(top = top + if (topDock) dockH else 0.dp, bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + if (bottomDock) 84.dp else 16.dp)
+                val bottom = maxOf(WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() + if (bottomDock) 84.dp else 16.dp, pad.calculateBottomPadding())
+                val inner = PaddingValues(top = top + if (topDock) dockH else 0.dp, bottom = bottom)
                 // Fade-through on effects springs: a bouncy spatial scale wobbled the whole screen. Each tab keeps its saved state (scroll, entrances) while away.
                 val fx = MaterialTheme.motionScheme.defaultEffectsSpec<Float>(); val fast = MaterialTheme.motionScheme.fastEffectsSpec<Float>()
                 val saved = rememberSaveableStateHolder()

@@ -75,6 +75,37 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
 
+private fun purgeQueueJobAndClean(
+    context: android.content.Context,
+    job: PatchJob,
+    builtApk: File?,
+    isInstalled: Boolean,
+    vm: MainViewModel,
+    scope: kotlinx.coroutines.CoroutineScope,
+    onDone: () -> Unit
+) {
+    val pkg = job.params.packageName
+    if (job.stage.isActive || job.stage == JobStage.QUEUED) {
+        PatchJobRunner.cancel(job.id)
+    }
+    JobStore.deleteJobsForPackage(pkg)
+    builtApk?.delete()
+    val precheckDir = File(context.cacheDir, "precheck_$pkg")
+    val precheckBytes = if (precheckDir.exists()) {
+        precheckDir.walkTopDown().filter { it.isFile }.sumOf { it.length() }.also { precheckDir.deleteRecursively() }
+    } else 0L
+    if (!isInstalled) {
+        com.orion.store.morphe.store.PatchedAppStore.removeRecordOnly(pkg)
+    }
+    val freed = com.orion.store.platform.OrionStorageManager.purgeAppStorage(job.params.appName, pkg) +
+        PatchStorageCleaner.purgeAppCache(context, pkg) + precheckBytes
+    scope.launch {
+        val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+        vm.snackbar.showSnackbar("Removed ${job.params.appName} from queue" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+    }
+    onDone()
+}
+
 @Composable
 fun QueueTab(vm: MainViewModel) {
     val jobs by JobStore.jobs.collectAsStateWithLifecycle()
@@ -298,6 +329,7 @@ fun JobItemCard(
 
     val builtApk = remember(job.outputApkPath, job.params.packageName, job.params.appName) {
         job.outputApkPath?.let { File(it) }?.takeIf { it.exists() && it.length() > 0 }
+            ?: com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(job.params.appName, job.params.packageName)
             ?: runCatching {
                 val downloads = com.orion.store.platform.Downloads.dir()
                 val pkg = job.params.packageName
@@ -386,7 +418,7 @@ fun JobItemCard(
                                 onClick = {
                                     menuExpanded = false
                                     vm.haptic(H.LIGHT)
-                                    vm.showInFolder(builtApk ?: com.orion.store.platform.Downloads.dir())
+                                    vm.showInFolder(builtApk ?: com.orion.store.platform.OrionStorageManager.getAppDir(job.params.appName, job.params.packageName))
                                 },
                                 leadingIcon = { Icon(Sym.FolderOpen, null) }
                             )
@@ -440,17 +472,7 @@ fun JobItemCard(
                                 onClick = {
                                     menuExpanded = false
                                     vm.haptic(H.LIGHT)
-                                    if (job.stage.isActive || job.stage == JobStage.QUEUED) {
-                                        PatchJobRunner.cancel(job.id)
-                                    }
-                                    JobStore.deleteJob(job.id)
-                                    builtApk?.delete()
-                                    val freed = PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
-                                    scope.launch {
-                                        val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
-                                        vm.snackbar.showSnackbar("Removed ${job.params.appName} from queue" + if (freed > 0) " (freed ${freedMb}MB)" else "")
-                                    }
-                                    onRemoveFromQueue()
+                                    purgeQueueJobAndClean(context, job, builtApk, isInstalled, vm, scope, onRemoveFromQueue)
                                 },
                                 leadingIcon = { Icon(Sym.Delete, null, tint = cs.error) }
                             )
@@ -496,17 +518,7 @@ fun JobItemCard(
                 OutlinedButton(
                     onClick = {
                         vm.haptic(H.MEDIUM)
-                        if (job.stage.isActive || job.stage == JobStage.QUEUED) {
-                            PatchJobRunner.cancel(job.id)
-                        }
-                        JobStore.deleteJob(job.id)
-                        builtApk?.delete()
-                        val freed = PatchStorageCleaner.purgeAppCache(context, job.params.packageName)
-                        scope.launch {
-                            val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
-                            vm.snackbar.showSnackbar("Removed ${job.params.appName} from queue" + if (freed > 0) " (freed ${freedMb}MB)" else "")
-                        }
-                        onRemoveFromQueue()
+                        purgeQueueJobAndClean(context, job, builtApk, isInstalled, vm, scope, onRemoveFromQueue)
                     },
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = cs.error),
                     border = BorderStroke(1.dp, cs.error.copy(alpha = 0.5f)),
@@ -527,7 +539,7 @@ fun JobItemCard(
                         OutlinedButton(
                             onClick = {
                                 vm.haptic(H.LIGHT)
-                                vm.showInFolder(builtApk ?: com.orion.store.platform.Downloads.dir())
+                                vm.showInFolder(builtApk ?: com.orion.store.platform.OrionStorageManager.getAppDir(job.params.appName, job.params.packageName))
                             },
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             shapes = ButtonDefaults.shapes()
@@ -619,7 +631,6 @@ fun JobItemCard(
                                 onClick = {
                                     vm.haptic(H.MEDIUM)
                                     JobStore.retryJob(job.id)
-                                    PatchJobRunner.runJob(job, context)
                                 },
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                                 shapes = ButtonDefaults.shapes()
@@ -695,7 +706,7 @@ fun CloneRepatchDialog(
                             ?: MorpheCatalogApp(packageName = targetPkg, name = job.params.appName)
                         vm.openMorpheInstall(morpheApp)
                     } else {
-                        JobStore.enqueue(newParams)
+                        vm.enqueuePatchJob(newParams, saveSelections = false)
                     }
                     vm.haptic(H.SUCCESS)
                     scope.launch {

@@ -8,6 +8,7 @@ import android.content.ComponentName
 import android.content.Context
 import android.os.Build
 import com.orion.store.data.Settings
+import com.orion.store.data.compareVersions
 import com.orion.store.morphe.model.PatchJobParams
 import com.orion.store.morphe.store.JobStore
 import com.orion.store.morphe.store.MorpheCatalogRepository
@@ -73,15 +74,25 @@ object AutoPatchWorker {
 
             // Inspect catalog metadata for this app
             val catalogApp = MorpheCatalogRepository.getApp(pkg)
-            val recommendedVersion = catalogApp?.compatibleVersions?.firstOrNull() ?: patchedApp.targetVersion
+            val recommendedVersion = catalogApp?.compatibleVersions
+                ?.filter { it.isNotBlank() }
+                ?.maxWithOrNull { a, b -> compareVersions(a, b) }
+                ?: patchedApp.targetVersion
 
             val targetVersion = pinnedVersion ?: recommendedVersion
 
             // Determine if an update is needed:
             // 1. Bundle updated
-            val bundleUpdated = false // will check commit hash if available
+            val bundleMeta = MorpheCatalogRepository.resolveBundleMetadata(patchedApp.patchBundleId)
+                ?: MorpheCatalogRepository.resolveBundleForPackage(pkg)
+            val bundleUpdated = bundleMeta != null &&
+                bundleMeta.version.isNotBlank() &&
+                patchedApp.patchBundleVersion.isNotBlank() &&
+                compareVersions(bundleMeta.version, patchedApp.patchBundleVersion) > 0
             // 2. Recommended app version updated (and not pinned)
-            val versionUpdated = pinnedVersion == null && recommendedVersion.isNotBlank() && recommendedVersion != patchedApp.installedVersion
+            val versionUpdated = pinnedVersion == null &&
+                recommendedVersion.isNotBlank() &&
+                compareVersions(recommendedVersion, patchedApp.installedVersion) > 0
 
             if (bundleUpdated || versionUpdated) {
                 val savedPatches = s.savedPatchSelections[pkg] ?: patchedApp.appliedPatches

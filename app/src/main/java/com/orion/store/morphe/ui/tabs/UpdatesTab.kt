@@ -84,7 +84,26 @@ fun UpdatesTab(vm: MainViewModel) {
                     Button(
                         onClick = {
                             vm.haptic(H.MEDIUM)
-                            vm.navTo(Tab.PATCH_STUDIO)
+                            val patchedByPkg = com.orion.store.morphe.store.PatchedAppStore.apps.value.associateBy { it.packageName }
+                            val pkgs = updates.map { it.id.removePrefix("bundle-").removePrefix("apk-") }.distinct()
+                            val savedSelections = com.orion.store.ui.Store.settings.value.savedPatchSelections
+                            for (pkg in pkgs) {
+                                val pApp = patchedByPkg[pkg] ?: continue
+                                val catApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg)
+                                val ver = catApp?.compatibleVersions?.firstOrNull() ?: pApp.targetVersion
+                                vm.enqueuePatchJob(
+                                    com.orion.store.morphe.model.PatchJobParams(
+                                        id = java.util.UUID.randomUUID().toString(),
+                                        packageName = pkg,
+                                        appName = pApp.appName,
+                                        targetVersion = ver,
+                                        patchBundleId = pApp.patchBundleId,
+                                        selectedPatchIds = savedSelections[pkg] ?: pApp.appliedPatches,
+                                        autoInstall = true
+                                    )
+                                )
+                            }
+                            vm.navTo(Tab.MYAPPS)
                         },
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp)
                     ) {
@@ -133,7 +152,14 @@ fun UpdatesTab(vm: MainViewModel) {
                             update = update,
                             onApply = {
                                 vm.haptic(H.MEDIUM)
-                                vm.navTo(Tab.PATCH_STUDIO)
+                                val pkg = update.id.removePrefix("bundle-").removePrefix("apk-")
+                                val catalogApp = com.orion.store.morphe.store.MorpheCatalogRepository.getApp(pkg)
+                                    ?: com.orion.store.morphe.store.MorpheCatalogApp(
+                                        packageName = pkg,
+                                        name = update.title.substringBefore(" (").ifBlank { pkg },
+                                        compatibleVersions = listOfNotNull(update.newVersion.takeIf { it.isNotBlank() })
+                                    )
+                                vm.openMorpheInstall(catalogApp)
                             }
                         )
                     }

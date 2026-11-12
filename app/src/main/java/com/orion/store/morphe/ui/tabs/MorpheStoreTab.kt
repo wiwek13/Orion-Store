@@ -39,6 +39,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.orion.store.data.Tab
 import com.orion.store.morphe.engine.PatchBundle
+import com.orion.store.morphe.store.MorpheCatalogApp
+import com.orion.store.morphe.store.MorpheCatalogRepository
 import com.orion.store.morphe.store.MorpheRepoStore
 import com.orion.store.ui.H
 import com.orion.store.ui.MainViewModel
@@ -114,19 +116,27 @@ fun MorpheStoreTab(vm: MainViewModel) {
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     val popular = listOf(
-                        "YouTube" to "AdBlock, SponsorBlock, OLED",
-                        "Spotify" to "AMOLED Black, No Podcasts",
-                        "Telegram" to "Anti-Delete, No Stories",
-                        "Twitter / X" to "Ad-free, Clean Navigation",
-                        "Reddit" to "No promoted posts, custom font"
+                        Triple("com.google.android.youtube", "YouTube", "AdBlock, SponsorBlock, OLED"),
+                        Triple("com.spotify.music", "Spotify", "AMOLED Black, No Podcasts"),
+                        Triple("org.telegram.messenger", "Telegram", "Anti-Delete, No Stories"),
+                        Triple("com.twitter.android", "Twitter / X", "Ad-free, Clean Navigation"),
+                        Triple("com.reddit.frontpage", "Reddit", "No promoted posts, custom font")
                     )
-                    items(popular) { (name, subtitle) ->
+                    items(popular) { (pkg, name, subtitle) ->
                         Card(
                             modifier = Modifier
                                 .width(160.dp)
                                 .clickable {
                                     vm.haptic(H.LIGHT)
-                                    vm.navTo(Tab.PATCH_STUDIO)
+                                    val found = MorpheCatalogRepository.getApp(pkg)
+                                        ?: MorpheCatalogRepository.apps.value.firstOrNull {
+                                            it.name.contains(name.substringBefore(" /"), ignoreCase = true)
+                                        }
+                                    if (found != null) {
+                                        vm.openMorpheInstall(found)
+                                    } else {
+                                        vm.navTo(Tab.ANDROID)
+                                    }
                                 },
                             shape = RoundedCornerShape(18.dp),
                             colors = CardDefaults.cardColors(containerColor = cs.surfaceContainer)
@@ -163,7 +173,18 @@ fun MorpheStoreTab(vm: MainViewModel) {
                     bundle = bundle,
                     onOpenInStudio = {
                         vm.haptic(H.MEDIUM)
-                        vm.navTo(Tab.PATCH_STUDIO)
+                        val matchingApp = MorpheCatalogRepository.apps.value.firstOrNull { app ->
+                            app.bundleNames.any { it.equals(bundle.name, ignoreCase = true) }
+                        } ?: bundle.patches.firstNotNullOfOrNull { p ->
+                            p.compatiblePackages.firstOrNull()?.let { pkg ->
+                                MorpheCatalogRepository.getApp(pkg) ?: MorpheCatalogApp(packageName = pkg, name = pkg.substringAfterLast('.').replaceFirstChar { it.uppercase() })
+                            }
+                        }
+                        if (matchingApp != null) {
+                            vm.openMorpheInstall(matchingApp)
+                        } else {
+                            vm.navTo(Tab.ANDROID)
+                        }
                     }
                 )
             }

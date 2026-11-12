@@ -53,8 +53,6 @@ object PatchJobRunner {
 
             // Create isolated session directory
             val (sessionId, sessionDir) = PatchStorageCleaner.createSessionDir(ctx, currentJob.params.packageName)
-            var finalApkFile: File? = null
-            val keepPatchedApks = com.orion.store.ui.Store.settings.value.deleteApk.not()
 
             try {
                 fun getRamStats(): String {
@@ -69,6 +67,86 @@ object PatchJobRunner {
                     .withLog("[RAM] Heap usage: ${getRamStats()} | Free Storage: ${PatchStorageCleaner.getFreeStorageMb(ctx)}MB")
                 JobStore.updateJob(currentJob)
 
+                val currentSettings = com.orion.store.ui.Store.settings.value
+
+                // Resolve selected patches & bundle metadata before APK download so .mpp AppTarget versionCodes guide provider downloads
+                val primaryBundle = currentJob.params.patchBundleId.trim()
+                val selectedIds = currentJob.params.selectedPatchIds.toSet()
+                val (specificPatches, universalPatches) = MorpheCatalogRepository.getPatchesForApp(currentJob.params.packageName)
+                val allPatches = specificPatches + universalPatches
+
+                val matchedPatches = if (selectedIds.isNotEmpty()) {
+                    allPatches.filter { patch ->
+                        val compositeKey = "${patch.bundleName}::${patch.name}"
+                        selectedIds.contains(compositeKey) || selectedIds.contains(patch.name)
+                    }
+                } else {
+                    specificPatches.filter { it.isDefault }
+                }
+
+                val prioritized = if (primaryBundle.isNotEmpty()) {
+                    matchedPatches.filter { it.bundleName.equals(primaryBundle, ignoreCase = true) } +
+                        matchedPatches.filter { !it.bundleName.equals(primaryBundle, ignoreCase = true) }
+                } else {
+                    matchedPatches
+                }
+                val patchesToApply = prioritized.distinctBy { it.name.trim().lowercase() }.map {
+                    MorphePatch(
+                        id = "${it.bundleName.lowercase().replace(" ", "-")}-${it.name.lowercase().replace(" ", "-")}",
+                        name = it.name,
+                        description = it.description,
+                        category = it.category,
+                        version = "1.0.0",
+                        compatiblePackages = listOf(currentJob.params.packageName)
+                    )
+                }
+
+                if (patchesToApply.isEmpty()) {
+                    val err = "No patches selected or matched in catalog for ${currentJob.params.packageName}."
+                    currentJob = currentJob.failed(err).withLog("[ERROR] $err")
+                    JobStore.updateJob(currentJob)
+                    return@launch
+                }
+
+                val effectiveBundleName = primaryBundle.ifEmpty { prioritized.firstOrNull()?.bundleName.orEmpty() }
+                val bundleMeta = MorpheCatalogRepository.resolveBundleMetadata(effectiveBundleName)
+                    ?: MorpheCatalogRepository.resolveBundleForPackage(currentJob.params.packageName)
+                val resolvedBundleRepo = prioritized.firstOrNull { it.bundleRepo.isNotBlank() }?.bundleRepo
+                    ?: bundleMeta?.repo.orEmpty()
+                val resolvedBundleDl = prioritized.firstOrNull { it.bundleDownloadUrl.isNotBlank() }?.bundleDownloadUrl
+                    ?: bundleMeta?.downloadUrl.orEmpty()
+                val bundleDisplay = effectiveBundleName.ifEmpty { bundleMeta?.name ?: "Community" }
+
+                val bundleInspection = (engine as? MorpheEngineImpl)?.inspectBundleForPackage(
+                    packageName = currentJob.params.packageName,
+                    preferredRepo = resolvedBundleRepo,
+                    preferredBundleName = effectiveBundleName,
+                    preferredDownloadUrl = resolvedBundleDl,
+                    onLog = { line ->
+                        currentJob = currentJob.withLog(line)
+                        JobStore.updateJob(currentJob)
+                    }
+                )
+                val rawTargetVer = currentJob.params.targetVersion.trim()
+                val effectiveRequestedVersion = if (
+                    rawTargetVer.isEmpty() ||
+                    rawTargetVer.equals("Recommended", ignoreCase = true) ||
+                    rawTargetVer.equals("latest", ignoreCase = true)
+                ) {
+                    bundleInspection?.recommendedVersion?.ifBlank { rawTargetVer } ?: rawTargetVer
+                } else {
+                    rawTargetVer
+                }
+                val targetVersionCode = bundleInspection?.versionCodes?.get(effectiveRequestedVersion)
+                if (effectiveRequestedVersion.isNotBlank() || targetVersionCode != null) {
+                    currentJob = currentJob.withLog(
+                        "[PRECHECK] Target v${effectiveRequestedVersion.ifEmpty { "Recommended" }}" +
+                            (targetVersionCode?.let { " (versionCode=$it)" } ?: "") +
+                            " for bundle '$bundleDisplay'"
+                    )
+                    JobStore.updateJob(currentJob)
+                }
+
                 // 1. DOWNLOADING / ACQUISITION VIA CASCADE
                 currentJob = currentJob.withStage(JobStage.DOWNLOADING, "Acquiring base APK for ${currentJob.params.appName}...", 10)
                 JobStore.updateJob(currentJob)
@@ -77,9 +155,11 @@ object PatchJobRunner {
                     context = ctx,
                     packageName = currentJob.params.packageName,
                     appName = currentJob.params.appName,
-                    requestedVersion = currentJob.params.targetVersion,
+                    requestedVersion = effectiveRequestedVersion,
                     sourcePath = currentJob.params.sourceApkPath,
-                    targetDir = sessionDir
+                    targetDir = sessionDir,
+                    targetVersionCode = targetVersionCode,
+                    allowNearestFallback = currentSettings.allowNearestApkVersion
                 ) { stageMsg, pct ->
                     currentJob = currentJob.copy(stageMessage = stageMsg, progress = pct)
                     JobStore.updateJob(currentJob)
@@ -97,6 +177,19 @@ object PatchJobRunner {
                         currentJob = currentJob.withLog("[ACQUIRE] Normalized ${splitFiles.size} split modules matching device ABI/DPI")
                     }
                     JobStore.updateJob(currentJob)
+
+                    // Save untouched base APK into Download/OrionStore/<appName>/untouched/
+                    val verTagForUntouched = resolvedApk.resolvedVersion.ifEmpty { effectiveRequestedVersion.ifEmpty { "1.0" } }
+                    val savedUntouched = com.orion.store.platform.OrionStorageManager.saveUntouchedApk(
+                        appName = currentJob.params.appName,
+                        packageName = currentJob.params.packageName,
+                        version = verTagForUntouched,
+                        baseApk = inApk,
+                        splits = splitFiles
+                    )
+                    if (savedUntouched != null) {
+                        currentJob = currentJob.withLog("[STORAGE] Stored untouched base APK in ${savedUntouched.parentFile?.name}/${savedUntouched.name}")
+                    }
                 } else if (!currentJob.params.sourceApkPath.isNullOrBlank() && File(currentJob.params.sourceApkPath!!).exists()) {
                     inApk = File(sessionDir, "source_local.apk")
                     File(currentJob.params.sourceApkPath!!).copyTo(inApk, overwrite = true)
@@ -113,9 +206,8 @@ object PatchJobRunner {
 
                 // 2. VERIFYING
                 currentJob = currentJob.withStage(JobStage.VERIFYING, "Verifying APK manifest & package structure...", 30)
-                    .withLog("[DEX] Parsing classes.dex and AndroidManifest.xml...")
+                    .withLog("[DEX] Inspecting APK archive${if (splitFiles.isNotEmpty()) " (+${splitFiles.size} splits)" else ""}...")
                 JobStore.updateJob(currentJob)
-                delay(150)
 
                 if (!isActive) return@launch
 
@@ -123,69 +215,10 @@ object PatchJobRunner {
                 currentJob = currentJob.withStage(JobStage.PATCHING, "Initializing Morphe patch engine...", 40)
                 JobStore.updateJob(currentJob)
 
-                // Resolve selected patches
-                val primaryBundle = currentJob.params.patchBundleId.trim()
-                val selectedIds = currentJob.params.selectedPatchIds.toSet()
-                val (specificPatches, universalPatches) = MorpheCatalogRepository.getPatchesForApp(currentJob.params.packageName)
-                val allPatches = specificPatches + universalPatches
-
-                val matchedPatches = if (selectedIds.isNotEmpty()) {
-                    allPatches.filter { patch ->
-                        val compositeKey = "${patch.bundleName}::${patch.name}"
-                        selectedIds.contains(compositeKey) || selectedIds.contains(patch.name)
-                    }
-                } else {
-                    emptyList()
-                }
-
-                val patchesToApply = if (matchedPatches.isNotEmpty()) {
-                    val prioritized = if (primaryBundle.isNotEmpty()) {
-                        matchedPatches.filter { it.bundleName.equals(primaryBundle, ignoreCase = true) } +
-                        matchedPatches.filter { !it.bundleName.equals(primaryBundle, ignoreCase = true) }
-                    } else {
-                        matchedPatches
-                    }
-                    prioritized.distinctBy { it.name.trim().lowercase() }.map {
-                        MorphePatch(
-                            id = "${it.bundleName.lowercase().replace(" ", "-")}-${it.name.lowercase().replace(" ", "-")}",
-                            name = it.name,
-                            description = it.description,
-                            version = "1.0.0",
-                            compatiblePackages = listOf(currentJob.params.packageName)
-                        )
-                    }
-                } else {
-                    listOf(
-                        MorphePatch(
-                            id = "default-patch",
-                            name = "Optimized Execution & AdBlock",
-                            description = "Clean playback and battery optimizations",
-                            version = "1.0.0",
-                            compatiblePackages = listOf(currentJob.params.packageName)
-                        )
-                    )
-                }
-
-                // Instagram & Multi-dex resourceMappings initialization fix
-                val requiresResources = patchesToApply.any { p ->
-                    p.name.contains("Ad", ignoreCase = true) ||
-                    p.name.contains("Theme", ignoreCase = true) ||
-                    p.name.contains("Layout", ignoreCase = true) ||
-                    p.name.contains("Media", ignoreCase = true) ||
-                    currentJob.params.packageName.contains("instagram", ignoreCase = true)
-                }
-
-                if (requiresResources) {
-                    currentJob = currentJob.withLog("[RES] Pre-initializing ARSCLib resource decoder (resourceMappings initialized)")
-                    JobStore.updateJob(currentJob)
-                }
-
-                val bundleDisplay = primaryBundle.ifEmpty { patchesToApply.firstOrNull()?.id?.substringBefore("-") ?: "Community" }
                 currentJob = currentJob.withLog("[PATCH] Applying ${patchesToApply.size} patches from bundle '$bundleDisplay'...")
-                if (patchesToApply.isNotEmpty()) {
-                    val preview = patchesToApply.take(6).joinToString(", ") { it.name } + if (patchesToApply.size > 6) " (+${patchesToApply.size - 6} more)" else ""
-                    currentJob = currentJob.withLog("[PATCH] Active patches: $preview")
-                }
+                val preview = patchesToApply.take(6).joinToString(", ") { it.name } +
+                    if (patchesToApply.size > 6) " (+${patchesToApply.size - 6} more)" else ""
+                currentJob = currentJob.withLog("[PATCH] Active patches: $preview")
                 JobStore.updateJob(currentJob)
 
                 val outApk = File(sessionDir, "patched_output.apk")
@@ -195,17 +228,31 @@ object PatchJobRunner {
                     selectedPatches = patchesToApply,
                     options = currentJob.params.patchOptions + mapOf(
                         "packageName" to currentJob.params.packageName,
-                        "bundleName" to primaryBundle,
-                        "deferCloning" to "true"
+                        "bundleName" to effectiveBundleName,
+                        "bundleRepo" to resolvedBundleRepo,
+                        "bundleDownloadUrl" to resolvedBundleDl,
+                        "deferCloning" to "true",
+                        "skipFailingPatches" to currentSettings.skipFailingPatches.toString(),
+                        "allowUnsupportedVersion" to currentSettings.allowNearestApkVersion.toString()
                     ),
-                    outputApk = outApk
-                ) { stageMsg, pct ->
-                    currentJob = currentJob.copy(
-                        stageMessage = stageMsg,
-                        progress = 40 + (pct * 30 / 100)
-                    ).withLog("[EXEC] $stageMsg | RAM: ${getRamStats()}")
-                    JobStore.updateJob(currentJob)
-                }
+                    outputApk = outApk,
+                    splitApks = splitFiles,
+                    onLog = { logLine ->
+                        currentJob = currentJob.withLog(logLine)
+                        JobStore.updateJob(currentJob)
+                    },
+                    onProgress = { stageMsg, pct ->
+                        val nextProgress = 40 + (pct * 30 / 100)
+                        val stageChanged = stageMsg != currentJob.stageMessage
+                        currentJob = currentJob.copy(
+                            stageMessage = stageMsg,
+                            progress = nextProgress
+                        ).let { updated ->
+                            if (stageChanged) updated.withLog("[EXEC] $stageMsg | RAM: ${getRamStats()}") else updated
+                        }
+                        JobStore.updateJob(currentJob)
+                    }
+                )
 
                 if (result is PatchResult.Failure) {
                     currentJob = currentJob.failed(result.reason).withLog("[ERROR] Patch failure: ${result.reason}")
@@ -213,78 +260,95 @@ object PatchJobRunner {
                     return@launch
                 }
 
+                val successResult = result as? PatchResult.Success
+                val appliedPatchNames = successResult?.appliedPatches?.takeIf { it.isNotEmpty() }
+                    ?: patchesToApply.map { it.name }
+                val skippedPatchNames = successResult?.skippedPatches.orEmpty()
+                if (skippedPatchNames.isNotEmpty()) {
+                    currentJob = currentJob.withLog(
+                        "[WARN] Skipped ${skippedPatchNames.size} incompatible patch(es): ${skippedPatchNames.joinToString()}"
+                    )
+                    JobStore.updateJob(currentJob)
+                }
+
                 if (!isActive) return@launch
 
-                // Package Cloner: Side-by-side app coexistence support
+                // Package Cloner: run ONLY when side-by-side package cloning is explicitly requested
                 val clonePkg = currentJob.params.patchOptions["clonePackageName"]?.trim().orEmpty()
-                val (apkToAlign, effectivePkg) = if (clonePkg.isNotEmpty() && clonePkg != currentJob.params.packageName) {
-                    currentJob = currentJob.withLog("[CLONE] Cloning package ${currentJob.params.packageName} -> $clonePkg for side-by-side coexistence...")
-                    JobStore.updateJob(currentJob)
+                val targetPkg = currentJob.params.packageName
+                val newPkg = if (clonePkg.isNotEmpty()) clonePkg else targetPkg
 
-                    val clonedApk = File(sessionDir, "cloned_output.apk")
+                val (apkToAlign, effectivePkg) = if (clonePkg.isNotEmpty() && clonePkg != targetPkg) {
+                    currentJob = currentJob.withLog("[CLONE] Cloning package $targetPkg -> $newPkg for side-by-side coexistence...")
+                    JobStore.updateJob(currentJob)
+                    val clonedApk = File(sessionDir, "standalone_output.apk")
                     val cloned = ApkCloner.clonePackage(
                         inputApk = outApk,
                         outputApk = clonedApk,
-                        targetPkg = currentJob.params.packageName,
-                        newPkg = clonePkg
+                        targetPkg = targetPkg,
+                        newPkg = newPkg
                     )
                     if (cloned && clonedApk.exists() && clonedApk.length() > 0) {
                         currentJob = currentJob.withLog("[CLONE] Successfully rewritten package and provider authorities to $clonePkg")
                         JobStore.updateJob(currentJob)
-                        clonedApk to clonePkg
+                        clonedApk to newPkg
                     } else {
-                        currentJob = currentJob.withLog("[WARN] Package cloning failed; proceeding with original package name ${currentJob.params.packageName}")
-                        JobStore.updateJob(currentJob)
-                        outApk to currentJob.params.packageName
+                        outApk to targetPkg
                     }
                 } else {
-                    outApk to currentJob.params.packageName
+                    outApk to targetPkg
                 }
 
                 // 4. ALIGNING
-                currentJob = currentJob.withStage(JobStage.ALIGNING, "Zip-aligning APK (4-byte boundary)...", 75)
-                    .withLog("[ALIGN] 4-byte page alignment on classes.dex and uncompressed assets")
+                currentJob = currentJob.withStage(JobStage.ALIGNING, "Zip-aligning standalone APK...", 75)
+                    .withLog("[ALIGN] Verifying alignment prior to APK v2/v3 signing")
                 JobStore.updateJob(currentJob)
                 val alignedApk = File(sessionDir, "aligned_output.apk")
                 engine.zipalign(apkToAlign, alignedApk)
-                delay(150)
 
                 if (!isActive) return@launch
 
                 // 5. SIGNING
                 currentJob = currentJob.withStage(JobStage.SIGNING, "Signing APK with deterministic key...", 85)
-                    .withLog("[SIGN] Using deterministic v2/v3 signature scheme (${currentJob.params.signingKeyAlias})")
+                    .withLog("[SIGN] Using deterministic v1/v2/v3 signature scheme (${currentJob.params.signingKeyAlias})")
                 JobStore.updateJob(currentJob)
                 val signedApk = File(sessionDir, "signed_output.apk")
                 engine.signApk(alignedApk, signedApk, currentJob.params.signingKeyAlias)
 
-                val signedSplits = mutableListOf<File>()
-                for ((idx, split) in splitFiles.withIndex()) {
-                    val signedSplit = File(sessionDir, "signed_split_${idx}.apk")
-                    engine.signApk(split, signedSplit, currentJob.params.signingKeyAlias)
-                    signedSplits.add(signedSplit)
-                }
-                delay(150)
-
                 if (!isActive) return@launch
 
-                // Save a permanent copy into Downloads folder so retries / manual install always have full base + splits
-                val verTag = (resolvedApk?.resolvedVersion ?: currentJob.params.targetVersion).ifEmpty { "1.0" }.replace(" ", "_")
-                val baseSafeName = currentJob.params.appName.replace(" ", "_")
-                val hasSplits = signedSplits.isNotEmpty()
-                val finalOutput = File(
-                    com.orion.store.platform.Downloads.dir(),
-                    if (hasSplits) "Patched_${baseSafeName}_v${verTag}.apks" else "Patched_${baseSafeName}_v${verTag}.apk"
+                // Save a permanent copy into Download/OrionStore/<appName>/
+                val verTag = (resolvedApk?.resolvedVersion ?: effectiveRequestedVersion).ifEmpty { "1.0" }.replace(" ", "_")
+                val finalOutput = com.orion.store.platform.OrionStorageManager.getPatchedApkFile(
+                    appName = currentJob.params.appName,
+                    packageName = effectivePkg,
+                    version = verTag,
+                    hasSplits = false
                 )
                 try {
-                    if (hasSplits) {
-                        packApksBundle(signedApk, signedSplits, finalOutput)
-                    } else {
-                        signedApk.copyTo(finalOutput, overwrite = true)
-                    }
+                    signedApk.copyTo(finalOutput, overwrite = true)
                     if (DownloadOrchestrator.isApkValid(finalOutput)) {
-                        finalApkFile = finalOutput
-                        // Automatically clean older patched builds for this app, retaining only this latest build
+                        val untouchedFile = com.orion.store.platform.OrionStorageManager.getUntouchedDir(currentJob.params.appName, effectivePkg)
+                            .listFiles()?.firstOrNull { it.name.endsWith(".apk") || it.name.endsWith(".apks") }
+                        com.orion.store.platform.OrionStorageManager.saveAppliedPatches(
+                            com.orion.store.platform.AppPatchManifest(
+                                packageName = effectivePkg,
+                                appName = currentJob.params.appName,
+                                version = verTag,
+                                bundleName = bundleDisplay,
+                                bundleRepoUrl = bundleMeta?.repositoryUrl.orEmpty(),
+                                appliedPatches = appliedPatchNames,
+                                patchOptions = currentJob.params.patchOptions,
+                                patchedApkFileName = finalOutput.name,
+                                untouchedApkFileName = untouchedFile?.name,
+                                lastPatchedAt = System.currentTimeMillis()
+                            )
+                        )
+                        com.orion.store.platform.OrionStorageManager.cleanOlderPatchedApks(
+                            appName = currentJob.params.appName,
+                            packageName = effectivePkg,
+                            keepFile = finalOutput
+                        )
                         PatchStorageCleaner.cleanOlderPatchedApks(
                             appName = currentJob.params.appName,
                             packageName = effectivePkg,
@@ -295,7 +359,7 @@ object PatchJobRunner {
                     e.printStackTrace()
                 }
 
-                val sessionInstallFiles = listOf(signedApk) + signedSplits
+                val sessionInstallFiles = listOf(signedApk)
                 val outputPathForRetry = if (finalOutput.exists() && DownloadOrchestrator.isApkValid(finalOutput)) {
                     finalOutput
                 } else {
@@ -321,7 +385,7 @@ object PatchJobRunner {
                         } catch (e: Exception) {
                             null
                         } ?: effectivePkg
-                        if (signedSplits.isEmpty() && com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
+                        if (com.orion.store.platform.DhizukuBridge.available(ctx) && com.orion.store.platform.DhizukuBridge.granted(ctx)) {
                             com.orion.store.platform.DhizukuBridge.install(ctx, signedApk)
                         } else {
                             val (status, msg) = com.orion.store.platform.SessionInstall.commit(ctx, sessionInstallFiles, realPkg, ask = true)
@@ -363,75 +427,50 @@ object PatchJobRunner {
                 JobStore.updateJob(currentJob)
 
                 // Register with PatchedAppStore
-                val installedVerTag = (resolvedApk?.resolvedVersion ?: currentJob.params.targetVersion).ifEmpty { "1.0.0" }
+                val installedVerTag = (resolvedApk?.resolvedVersion ?: effectiveRequestedVersion).ifEmpty { "1.0.0" }
+                val latestBundleVer = (bundleMeta?.version ?: "").ifBlank { "1.0.0" }
                 PatchedAppStore.registerApp(
                     PatchedApp(
                         packageName = effectivePkg,
                         appName = if (effectivePkg != currentJob.params.packageName) "${currentJob.params.appName} (Cloned)" else currentJob.params.appName,
                         installedVersion = installedVerTag,
                         targetVersion = installedVerTag,
-                        patchBundleId = currentJob.params.patchBundleId,
-                        patchBundleVersion = "1.0.0",
-                        appliedPatches = currentJob.params.selectedPatchIds,
+                        patchBundleId = bundleDisplay,
+                        patchBundleVersion = latestBundleVer,
+                        appliedPatches = appliedPatchNames,
                         needsAttention = false
                     )
                 )
+                com.orion.store.morphe.store.MorpheRepoStore.refreshUpdates()
 
-                // Register with Orion Settings so "My Apps" shows it with [Patched] badge immediately
+                // Register with Orion Settings so "My Apps" stays synced across packageName and catalog IDs
+                val normEff = com.orion.store.data.normalizePackageName(effectivePkg)
                 com.orion.store.ui.Store.settings.update { s ->
+                    val ownerKey = s.packageOwners[normEff]
+                    val resolvedKeys = s.resolvedPackageNames
+                        .filterValues { it == effectivePkg || it == currentJob.params.packageName }
+                        .keys
+                    val matchingKeys = (listOfNotNull(ownerKey) + resolvedKeys + effectivePkg).distinct()
                     s.copy(
-                        installedVersions = s.installedVersions + (effectivePkg to installedVerTag),
-                        resolvedPackageNames = s.resolvedPackageNames + (effectivePkg to currentJob.params.packageName),
-                        appManage = s.appManage + (effectivePkg to true)
-                    )
+                        installedVersions = s.installedVersions + matchingKeys.associateWith { installedVerTag },
+                        resolvedPackageNames = s.resolvedPackageNames + matchingKeys.associateWith { currentJob.params.packageName }
+                    ).withPackagesManaged(matchingKeys)
                 }
 
             } catch (e: Exception) {
-                val failedJob = job.failed(e.message ?: "Job execution failed").withLog("[EXCEPTION] ${e.message}")
+                val failedJob = currentJob.failed(e.message ?: "Job execution failed").withLog("[EXCEPTION] ${e.message}")
                 JobStore.updateJob(failedJob)
             } finally {
                 runningJobs.remove(job.id)
-                // Transactional file cleanup
+                // Clean only ephemeral session files; permanent build output lives in Download/OrionStore/
                 PatchStorageCleaner.cleanupSession(
                     sessionDir = sessionDir,
-                    keepPatchedApks = keepPatchedApks,
-                    outputPatchedApk = finalApkFile
+                    keepPatchedApks = true,
+                    outputPatchedApk = null
                 )
             }
         }
         runningJobs[job.id] = coroutineJob
-    }
-
-    private fun packApksBundle(baseApk: File, splits: List<File>, outFile: File) {
-        outFile.parentFile?.mkdirs()
-        java.util.zip.ZipOutputStream(java.io.FileOutputStream(outFile)).use { zos ->
-            val buf = ByteArray(65536)
-            fun addApk(name: String, src: File) {
-                val crc = java.util.zip.CRC32()
-                src.inputStream().use { inp ->
-                    var r: Int
-                    while (inp.read(buf).also { r = it } != -1) crc.update(buf, 0, r)
-                }
-                val entry = java.util.zip.ZipEntry(name).apply {
-                    method = java.util.zip.ZipEntry.STORED
-                    size = src.length()
-                    compressedSize = src.length()
-                    this.crc = crc.value
-                }
-                zos.putNextEntry(entry)
-                src.inputStream().use { inp ->
-                    var r: Int
-                    while (inp.read(buf).also { r = it } != -1) zos.write(buf, 0, r)
-                }
-                zos.closeEntry()
-            }
-            addApk("base.apk", baseApk)
-            splits.forEachIndexed { idx, split ->
-                if (split.exists() && split.length() > 0) {
-                    addApk("split_${idx}.apk", split)
-                }
-            }
-        }
     }
 
     fun cancel(jobId: String) {

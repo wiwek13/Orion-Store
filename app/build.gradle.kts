@@ -13,10 +13,10 @@ android {
     compileSdk = 37
     defaultConfig {
         applicationId = "com.orion.store"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
-        versionCode = 35
-        versionName = "2.7.5"
+        versionCode = 36
+        versionName = "2.7.6"
         // Phones and TVs are ARM; the x86 builds of the native libraries only served emulators
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
@@ -72,9 +72,15 @@ dependencies {
     implementation("dev.rikka.shizuku:provider:13.1.5")
     implementation("io.github.iamr0s:Dhizuku-API:2.6.0")
     // Built-in wireless ADB: installs as the shell user, which skips the unverified-developer 24-hour wait
-    implementation("com.github.MuntashirAkon:libadb-android:3.1.1")
-    implementation("com.android.tools.build:apksig:8.7.0")
-    implementation("org.bouncycastle:bcpkix-jdk15to18:1.81")
+    implementation("com.github.MuntashirAkon:libadb-android:3.1.1") {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk15to18")
+        exclude(group = "org.bouncycastle", module = "bcpkix-jdk15to18")
+        exclude(group = "org.bouncycastle", module = "bcutil-jdk15to18")
+    }
+    // Real Morphe Patcher runtime (includes dexlib2/smali, REAndroid ARSCLib, apksig 9.1.1, bcpkix-jdk18on)
+    implementation("app.morphe:morphe-patcher:2.3.0")
+    implementation("com.android.tools.build:apksig:9.1.1")
+    implementation("org.bouncycastle:bcpkix-jdk18on:1.77")
     implementation("org.conscrypt:conscrypt-android:2.7.0")
     implementation("com.unity3d.ads:unity-ads:4.21.0")
     implementation("androidx.startup:startup-runtime:1.2.0") // starts Unity on first ad, see unityLoad

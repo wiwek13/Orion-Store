@@ -37,6 +37,26 @@ object ApkMirrorResolver {
             ?: variants.firstOrNull()
     }
 
+    internal fun findMatchingReleaseUrl(html: String, requestedVersion: String): String? {
+        val cleanVer = requestedVersion.trim().removePrefix("v").lowercase()
+        val isConcrete = cleanVer.isNotBlank() &&
+            cleanVer != "recommended" &&
+            cleanVer != "latest" &&
+            cleanVer != "local" &&
+            cleanVer != "saved"
+
+        val allMatches = releaseRegex.findAll(html).map { it.groupValues[1] }.toList()
+        if (allMatches.isEmpty()) return null
+        if (!isConcrete) return "https://www.apkmirror.com" + allMatches.first()
+
+        val slugVer = cleanVer.replace('.', '-')
+        val matched = allMatches.firstOrNull { path ->
+            val low = path.lowercase()
+            low.contains("-$slugVer-") || low.contains(slugVer) || low.contains(cleanVer)
+        } ?: return null
+        return "https://www.apkmirror.com$matched"
+    }
+
     suspend fun resolveAndDownload(
         packageName: String,
         appName: String,
@@ -57,8 +77,7 @@ object ApkMirrorResolver {
                 val html = resp.body?.string().orEmpty()
                 if (html.isEmpty()) return@withContext null
 
-                val releaseMatch = releaseRegex.find(html) ?: return@withContext null
-                "https://www.apkmirror.com" + releaseMatch.groupValues[1]
+                findMatchingReleaseUrl(html, requestedVersion) ?: return@withContext null
             }
 
             onProgress("Fetching release variants from APKMirror...", 15)

@@ -62,4 +62,27 @@ class ApkMirrorResolverTest {
         val selected = ApkMirrorResolver.selectBestVariant(emptyList())
         assertNull(selected)
     }
+
+    @Test
+    fun testFindMatchingReleaseUrlRespectsRequestedVersion() {
+        val html = """
+            <a href="/apk/instagram/instagram-instagram/instagram-455-0-0-51-72-release/">455.0.0.51.72</a>
+            <a href="/apk/instagram/instagram-instagram/instagram-454-0-0-54-77-release/">454.0.0.54.77</a>
+        """.trimIndent()
+
+        val exact = ApkMirrorResolver.findMatchingReleaseUrl(html, "454.0.0.54.77")
+        assertEquals(
+            "https://www.apkmirror.com/apk/instagram/instagram-instagram/instagram-454-0-0-54-77-release/",
+            exact
+        )
+
+        val missing = ApkMirrorResolver.findMatchingReleaseUrl(html, "453.0.0.10.20")
+        assertNull("Missing requested version must return null instead of latest", missing)
+
+        val anyLatest = ApkMirrorResolver.findMatchingReleaseUrl(html, "Recommended")
+        assertEquals(
+            "https://www.apkmirror.com/apk/instagram/instagram-instagram/instagram-455-0-0-51-72-release/",
+            anyLatest
+        )
+    }
 }

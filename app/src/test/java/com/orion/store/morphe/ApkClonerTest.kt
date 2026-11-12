@@ -325,4 +325,31 @@ class ApkClonerTest {
         tempIn.delete()
         tempOut.delete()
     }
+
+    @Test
+    fun `test rewritePackageString respects package boundaries and avoids substring corruption`() {
+        val target = "com.instagram.android"
+        val clone = "com.instagram.clone"
+        assertEquals(clone, ApkCloner.rewritePackageString("com.instagram.android", target, clone))
+        assertEquals(
+            "com.instagram.clone.fileprovider",
+            ApkCloner.rewritePackageString("com.instagram.android.fileprovider", target, clone)
+        )
+        assertEquals(
+            "content://com.instagram.clone.provider/items",
+            ApkCloner.rewritePackageString("content://com.instagram.android.provider/items", target, clone)
+        )
+        assertEquals(
+            "com.instagram.clone:remote",
+            ApkCloner.rewritePackageString("com.instagram.android:remote", target, clone)
+        )
+        assertEquals(
+            "com.instagram.android2.extra",
+            ApkCloner.rewritePackageString("com.instagram.android2.extra", target, clone)
+        )
+        assertEquals(
+            "org.other.com.instagram.android",
+            ApkCloner.rewritePackageString("org.other.com.instagram.android", target, clone)
+        )
+    }
 }

@@ -26,19 +26,8 @@ object ApkCloner {
         newPkg: String
     ): Boolean {
         if (!inputApk.exists() || inputApk.length() == 0L) return false
-        if (targetPkg.isBlank() || newPkg.isBlank()) return false
 
         outputApk.parentFile?.mkdirs()
-
-        if (targetPkg == newPkg) {
-            return try {
-                inputApk.copyTo(outputApk, overwrite = true)
-                true
-            } catch (e: Exception) {
-                e.printStackTrace()
-                false
-            }
-        }
 
         try {
             ZipFile(inputApk).use { inZip ->
@@ -127,7 +116,7 @@ object ApkCloner {
      * If input is not binary AXML or parsing fails, falls back gracefully to raw byte replacement.
      */
     internal fun rewriteAxmlPackage(axmlBytes: ByteArray, targetPkg: String, newPkg: String): ByteArray {
-        if (targetPkg.isEmpty() || newPkg.isEmpty() || targetPkg == newPkg) return axmlBytes
+        val needsCloning = targetPkg.isNotBlank() && newPkg.isNotBlank() && targetPkg != newPkg
         if (axmlBytes.size < 36) return fallbackRawRewrite(axmlBytes, targetPkg, newPkg)
 
         return try {
@@ -229,12 +218,9 @@ object ApkCloner {
 
             var modified = false
             val newStrings = originalStrings.map { str ->
-                if (str.contains(targetPkg)) {
-                    modified = true
-                    str.replace(targetPkg, newPkg)
-                } else {
-                    str
-                }
+                val rewritten = if (needsCloning) rewritePackageString(str, targetPkg, newPkg) else str
+                if (rewritten != str) modified = true
+                rewritten
             }
 
             if (!modified) {
@@ -403,19 +389,25 @@ object ApkCloner {
     }
 
     private fun fallbackRawRewrite(axmlBytes: ByteArray, oldPkg: String, newPkg: String): ByteArray {
-        if (oldPkg.isEmpty() || newPkg.isEmpty()) return axmlBytes
+        var current = axmlBytes
+        if (oldPkg.isNotEmpty() && newPkg.isNotEmpty() && oldPkg != newPkg) {
+            current = rawReplace(current, oldPkg, newPkg)
+        }
+        current = rawReplace(current, "com.android.vending.splits.required", "com.android.vending.splits.disabled")
+        return current
+    }
 
-        val targetOld8 = oldPkg.toByteArray(Charsets.UTF_8)
-        val targetNew8 = newPkg.toByteArray(Charsets.UTF_8)
-        val targetOld16 = oldPkg.toByteArray(Charsets.UTF_16LE)
-        val targetNew16 = newPkg.toByteArray(Charsets.UTF_16LE)
+    private fun rawReplace(bytes: ByteArray, oldStr: String, newStr: String): ByteArray {
+        val targetOld8 = oldStr.toByteArray(Charsets.UTF_8)
+        val targetNew8 = newStr.toByteArray(Charsets.UTF_8)
+        val targetOld16 = oldStr.toByteArray(Charsets.UTF_16LE)
+        val targetNew16 = newStr.toByteArray(Charsets.UTF_16LE)
 
-        val out = ByteArrayOutputStream(axmlBytes.size + 1024)
-
+        val out = ByteArrayOutputStream(bytes.size + 1024)
         var i = 0
-        while (i < axmlBytes.size) {
-            val match8 = matchesAt(axmlBytes, i, targetOld8)
-            val match16 = if (!match8) matchesAt(axmlBytes, i, targetOld16) else false
+        while (i < bytes.size) {
+            val match8 = matchesAt(bytes, i, targetOld8)
+            val match16 = if (!match8) matchesAt(bytes, i, targetOld16) else false
 
             when {
                 match8 -> {
@@ -427,7 +419,7 @@ object ApkCloner {
                     i += targetOld16.size
                 }
                 else -> {
-                    out.write(axmlBytes[i].toInt())
+                    out.write(bytes[i].toInt())
                     i++
                 }
             }
@@ -441,5 +433,15 @@ object ApkCloner {
             if (bytes[offset + j] != target[j]) return false
         }
         return true
+    }
+
+    /**
+     * Replaces [targetPkg] only at package/authority boundaries (exact match, `.sub`, `:suffix`, `/path`, `://host`),
+     * preventing substring corruption such as rewriting `com.foo.bar2` when cloning `com.foo.bar`.
+     */
+    internal fun rewritePackageString(value: String, targetPkg: String, newPkg: String): String {
+        if (targetPkg.isBlank() || targetPkg == newPkg || !value.contains(targetPkg)) return value
+        val boundaryRegex = Regex("""(?<![A-Za-z0-9_.])""" + Regex.escape(targetPkg) + """(?=$|[.:/])""")
+        return boundaryRegex.replace(value, newPkg)
     }
 }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -28,8 +29,16 @@ object PatchedAppStore {
     private val storageFile: File
         get() = File(OrionApp.instance.filesDir, FILE_NAME)
 
+    private val ioScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+    private val writeLock = Any()
+
     init {
         loadFromDisk()
+        ioScope.launch {
+            syncWithStorageFiles()
+        }
     }
 
     private fun loadFromDisk() {
@@ -45,13 +54,69 @@ object PatchedAppStore {
         }
     }
 
-    private fun saveToDisk() {
+    /**
+     * Reads applied_patches.json from Download/OrionStore/<appName>/ and syncs them into the app.
+     * Automatically handles changes made externally to the patch files.
+     */
+    fun syncWithStorageFiles() {
         try {
-            val file = storageFile
-            val text = json.encodeToString(_apps.value)
-            file.writeText(text)
+            com.orion.store.platform.OrionStorageManager.migrateLegacyDownloads()
+            val manifests = com.orion.store.platform.OrionStorageManager.scanAllAppFolders()
+            if (manifests.isNotEmpty()) {
+                val current = _apps.value.associateBy { it.packageName }.toMutableMap()
+                var changed = false
+                for (m in manifests) {
+                    val existing = current[m.packageName]
+                    if (existing == null) {
+                        current[m.packageName] = PatchedApp(
+                            packageName = m.packageName,
+                            appName = m.appName,
+                            installedVersion = m.version,
+                            targetVersion = m.version,
+                            patchBundleId = m.bundleName,
+                            patchBundleVersion = "",
+                            appliedPatches = m.appliedPatches,
+                            installedAt = m.lastPatchedAt
+                        )
+                        changed = true
+                    } else if (existing.appliedPatches != m.appliedPatches) {
+                        // File on disk has updated patches! Sync them into app
+                        current[m.packageName] = existing.copy(appliedPatches = m.appliedPatches)
+                        changed = true
+                    }
+                }
+                if (changed) {
+                    _apps.value = current.values.toList()
+                    recalculateAttention()
+                    saveToDisk()
+                }
+            }
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    private fun saveToDisk() {
+        val snapshot = _apps.value
+        ioScope.launch {
+            synchronized(writeLock) {
+                try {
+                    val file = storageFile
+                    file.parentFile?.mkdirs()
+                    val text = json.encodeToString(snapshot)
+                    val atomic = android.util.AtomicFile(file)
+                    val stream = atomic.startWrite()
+                    try {
+                        stream.write(text.toByteArray(Charsets.UTF_8))
+                        atomic.finishWrite(stream)
+                    } catch (e: Exception) {
+                        atomic.failWrite(stream)
+                        throw e
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
         }
     }
 
@@ -65,9 +130,38 @@ object PatchedAppStore {
         }
         recalculateAttention()
         saveToDisk()
+
+        // Also ensure applied_patches.json is saved/updated on disk in Download/OrionStore/<appName>/
+        try {
+            com.orion.store.platform.OrionStorageManager.saveAppliedPatches(
+                com.orion.store.platform.AppPatchManifest(
+                    packageName = app.packageName,
+                    appName = app.appName,
+                    version = app.installedVersion,
+                    bundleName = app.patchBundleId,
+                    bundleRepoUrl = "",
+                    appliedPatches = app.appliedPatches,
+                    patchOptions = emptyMap(),
+                    lastPatchedAt = app.installedAt
+                )
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     fun removeApp(packageName: String) {
+        val app = getApp(packageName)
+        _apps.update { list -> list.filterNot { it.packageName == packageName } }
+        recalculateAttention()
+        saveToDisk()
+        if (app != null) {
+            com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.appName, packageName)
+        }
+    }
+
+    /** Removes the patched app registry entry without purging files on disk. */
+    fun removeRecordOnly(packageName: String) {
         _apps.update { list -> list.filterNot { it.packageName == packageName } }
         recalculateAttention()
         saveToDisk()

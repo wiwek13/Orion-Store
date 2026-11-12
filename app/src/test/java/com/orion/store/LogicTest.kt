@@ -358,5 +358,78 @@ class LogicTest {
         val v = Orbit.versionsOf(o, rel)
         assertEquals(listOf("2.0", "1.9"), v.map { it.version }); assertEquals(listOf("u1"), v[1].variants.map { it.url })
         assertEquals(listOf("1.9"), Orbit.versionsOf(o.copy(includePre = false), rel).map { it.version })
+
+        val igApp = AppItem(id = "com.instagram.android", packageName = "com.instagram.android", name = "Instagram")
+        val uninstalledPatched = MyAppRow(
+            app = igApp, status = "installed", installedVersion = null, lastRemoteVersion = "455.0.0.51.72",
+            readyFile = null, cleanupFile = null, libraryFile = null, downloadKey = null,
+            hasSavedApk = false, hasUpdate = false, isInstalledNow = false, libraryStatus = "installed",
+            progress = 0f, downloadedAt = 1L, installedAt = null, isPatched = true, patchedApp = null
+        )
+        assertEquals("Patched build removed", uninstalledPatched.statusLabel)
+        val installedPatched = uninstalledPatched.copy(isInstalledNow = true, installedVersion = "455.0.0.51.72")
+        assertEquals("Patched", installedPatched.statusLabel)
+        val installedWithCount = installedPatched.copy(
+            patchedApp = com.orion.store.morphe.model.PatchedApp(
+                packageName = "com.instagram.android",
+                appName = "Instagram",
+                installedVersion = "455.0.0.51.72",
+                targetVersion = "455.0.0.51.72",
+                patchBundleId = "bundle",
+                patchBundleVersion = "1.0.0",
+                appliedPatches = listOf("p1", "p2")
+            )
+        )
+        assertEquals("Patched · 2 patches", installedWithCount.statusLabel)
+    }
+
+    @Test fun deletedThenRepatchedAppearsImmediatelyInMyApps() {
+        val igCatalog = AppItem(
+            id = "instagram-piko",
+            packageName = "com.instagram.android",
+            name = "Instagram Morphe",
+            author = "crimera"
+        )
+        // Simulate state right after "Delete from My Apps" while original Instagram remained installed:
+        val hiddenSettings = Settings(appManage = mapOf("instagram-piko" to false))
+        assertTrue(buildMyAppsRows(listOf(igCatalog), hiddenSettings, DataState(), emptySet(), emptyList(), emptyList()).isEmpty())
+
+        // User starts patching Instagram again -> active job in JobStore
+        val activeJob = com.orion.store.morphe.model.PatchJob(
+            id = "job-1",
+            params = com.orion.store.morphe.model.PatchJobParams(
+                id = "job-1",
+                packageName = "com.instagram.android",
+                appName = "Instagram Morphe",
+                targetVersion = "454.0.0.54.77"
+            ),
+            stage = com.orion.store.morphe.model.JobStage.PATCHING,
+            progress = 42,
+            createdAt = 5000L
+        )
+        val rows = buildMyAppsRows(listOf(igCatalog), hiddenSettings, DataState(), emptySet(), emptyList(), listOf(activeJob))
+        assertEquals(1, rows.size)
+        val row = rows.single()
+        assertEquals("patching", row.status)
+        assertEquals(42f, row.progress, 0.01f)
+        assertEquals("Patching 42%", row.statusLabel)
+        assertTrue(row.matches(MyAppsFilter.ALL))
+        assertTrue(row.matches(MyAppsFilter.DOWNLOADED))
+        assertTrue(row.matches(MyAppsFilter.PATCHED))
+
+        // Standalone Morphe app (not in catalog) with active job also shows immediately
+        val standaloneJob = activeJob.copy(
+            id = "job-2",
+            params = activeJob.params.copy(id = "job-2", packageName = "com.standalone.app", appName = "Standalone"),
+            createdAt = 6000L
+        )
+        val both = buildMyAppsRows(listOf(igCatalog), Settings(), DataState(), emptySet(), emptyList(), listOf(activeJob, standaloneJob))
+        assertEquals(2, both.size)
+        assertEquals("com.standalone.app", both.first().app.packageName)
+
+        // withPackagesManaged clears hidden flags across catalog IDs and package names
+        val restored = hiddenSettings.withPackagesManaged(listOf("instagram-piko", "com.instagram.android"))
+        assertTrue(isManaged("instagram-piko", restored))
+        assertNull(restored.appManage["instagram-piko"])
     }
 }

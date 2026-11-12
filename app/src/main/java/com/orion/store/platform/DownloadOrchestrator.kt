@@ -2,6 +2,7 @@ package com.orion.store.platform
 
 import android.content.Context
 import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import com.orion.store.data.Net
 import com.orion.store.ui.Store
 import kotlinx.coroutines.Dispatchers
@@ -45,12 +46,62 @@ object DownloadOrchestrator {
             .build()
     }
 
+    data class ApkManifestMeta(
+        val packageName: String,
+        val versionName: String,
+        val versionCode: Long
+    )
+
     data class ResolvedApk(
         val baseApk: File,
         val splits: List<File> = emptyList(),
         val sourceProvider: String,
-        val resolvedVersion: String
+        val resolvedVersion: String,
+        val resolvedVersionCode: Long = -1L
     )
+
+    internal fun isSpecificVersionRequest(requestedVersion: String): Boolean {
+        val clean = requestedVersion.trim().removePrefix("v").lowercase()
+        return clean.isNotBlank() &&
+            clean != "recommended" &&
+            clean != "latest" &&
+            clean != "local" &&
+            clean != "saved"
+    }
+
+    internal fun versionsMatch(actualVersion: String, requestedVersion: String): Boolean {
+        val a = actualVersion.trim().removePrefix("v").lowercase()
+        val r = requestedVersion.trim().removePrefix("v").lowercase()
+        if (a.isBlank() || r.isBlank()) return false
+        return a == r
+    }
+
+    internal fun parseApkPureVersionCodeFromHtml(html: String, requestedVersion: String): Long? {
+        val target = requestedVersion.trim().removePrefix("v")
+        if (target.isBlank()) return null
+        val regex = Regex(
+            """data-dt-(?:version-code|versioncode)="(\d+)"[^>]{0,240}data-dt-version="([^"]+)"|data-dt-version="([^"]+)"[^>]{0,240}data-dt-(?:version-code|versioncode)="(\d+)"""",
+            RegexOption.IGNORE_CASE
+        )
+        for (m in regex.findAll(html)) {
+            val code = (m.groupValues[1].ifBlank { m.groupValues[4] }).toLongOrNull() ?: continue
+            val ver = m.groupValues[2].ifBlank { m.groupValues[3] }
+            if (versionsMatch(ver, target)) return code
+        }
+        return null
+    }
+
+    fun probeApkMetadata(apkFile: File): ApkManifestMeta? {
+        if (!apkFile.exists()) return null
+        return runCatching {
+            val pm = com.orion.store.OrionApp.instance.packageManager
+            val info = pm.getPackageArchiveInfo(apkFile.absolutePath, 0) ?: return null
+            val pkg = info.packageName.orEmpty()
+            val verName = info.versionName.orEmpty()
+            val verCode = PackageInfoCompat.getLongVersionCode(info)
+            ApkManifestMeta(packageName = pkg, versionName = verName, versionCode = verCode)
+        }.getOrNull()
+    }
 
     fun getBaseCacheDir(context: Context, packageName: String): File {
         val dir = File(context.filesDir, "base_apk_cache/$packageName")
@@ -58,7 +109,7 @@ object DownloadOrchestrator {
         return dir
     }
 
-    private fun resolveFromBaseCache(
+    internal fun resolveFromBaseCache(
         context: Context,
         packageName: String,
         requestedVersion: String,
@@ -69,14 +120,17 @@ object DownloadOrchestrator {
 
         val cleanReq = requestedVersion.trim().removePrefix("v").lowercase()
         val isAnyVersion = cleanReq.isBlank() || cleanReq == "recommended" || cleanReq == "latest"
+        val reqToken = cleanReq.replace(Regex("[^a-z0-9._-]"), "_")
 
         // 1. Prefer versioned split-aware bundle folders: base_apk_cache/<pkg>/bundle_<ver>/
         val bundleDirs = cacheDir.listFiles()?.filter { it.isDirectory && it.name.startsWith("bundle_") }?.sortedByDescending { it.lastModified() }.orEmpty()
         val orderedDirs = if (isAnyVersion) {
             bundleDirs
         } else {
-            val exact = bundleDirs.filter { it.name.lowercase().contains(cleanReq) }
-            exact + bundleDirs.filterNot { it in exact }
+            bundleDirs.filter { dir ->
+                val verPart = dir.name.removePrefix("bundle_").lowercase()
+                verPart == cleanReq || verPart == reqToken
+            }
         }
         for (bDir in orderedDirs) {
             val baseFile = File(bDir, "base.apk")
@@ -84,22 +138,28 @@ object DownloadOrchestrator {
                 bDir.deleteRecursively()
                 continue
             }
+            val probed = probeApkMetadata(baseFile)
+            val folderVer = bDir.name.removePrefix("bundle_")
+            if (!isAnyVersion && probed != null && probed.versionName.isNotBlank() && !versionsMatch(probed.versionName, requestedVersion)) {
+                android.util.Log.w(
+                    "DownloadOrchestrator",
+                    "Evicting poisoned cache ${bDir.name}: manifest v${probed.versionName} (${probed.versionCode}) != requested $requestedVersion"
+                )
+                bDir.deleteRecursively()
+                continue
+            }
             val splitFiles = bDir.listFiles()
                 ?.filter { it.isFile && it.name != "base.apk" && it.extension.equals("apk", ignoreCase = true) && isApkValid(it) }
                 ?.sortedBy { it.name }
                 .orEmpty()
-            if (splitFiles.isEmpty() && apkRequiresSplits(baseFile)) {
-                // Purge incomplete split-requiring base APK from cache so full XAPK/splits get fetched
-                bDir.deleteRecursively()
-                continue
-            }
             val destBase = File(targetDir, "cached_base.apk")
             baseFile.copyTo(destBase, overwrite = true)
             val destSplits = splitFiles.mapIndexed { idx, sf ->
                 File(targetDir, "cached_split_$idx.apk").also { sf.copyTo(it, overwrite = true) }
             }
-            val ver = bDir.name.removePrefix("bundle_")
-            return ResolvedApk(destBase, destSplits, "Cached Base APK (Reused)", ver)
+            val realVer = probed?.versionName?.takeIf { it.isNotBlank() } ?: folderVer
+            val realCode = probed?.versionCode ?: -1L
+            return ResolvedApk(destBase, destSplits, "Cached Base APK (Reused)", realVer, realCode)
         }
 
         // 2. Fallback to legacy flat APK files in base_apk_cache/<pkg>/
@@ -112,21 +172,25 @@ object DownloadOrchestrator {
         val chosen = if (isAnyVersion) {
             candidates.maxByOrNull { it.lastModified() }
         } else {
-            candidates.firstOrNull { it.name.lowercase().contains(cleanReq) }
-                ?: candidates.maxByOrNull { it.lastModified() }
+            candidates.firstOrNull { file ->
+                val probed = probeApkMetadata(file)
+                if (probed != null && probed.versionName.isNotBlank()) {
+                    versionsMatch(probed.versionName, requestedVersion)
+                } else {
+                    val verToken = file.name.substringAfterLast("_").substringBeforeLast(".apk").lowercase()
+                    verToken == cleanReq || verToken == reqToken
+                }
+            }
         } ?: return null
-
-        if (apkRequiresSplits(chosen)) {
-            // Incomplete legacy cache (split base APK without splits) — purge it
-            chosen.delete()
-            return null
-        }
 
         val dest = File(targetDir, "cached_base.apk")
         chosen.copyTo(dest, overwrite = true)
         if (isApkValid(dest, requireCleanBase = true)) {
-            val ver = chosen.name.substringAfterLast("_").substringBeforeLast(".apk")
-            return ResolvedApk(dest, emptyList(), "Cached Base APK (Reused)", ver)
+            val probed = probeApkMetadata(dest)
+            val ver = probed?.versionName?.takeIf { it.isNotBlank() }
+                ?: chosen.name.substringAfterLast("_").substringBeforeLast(".apk")
+            val code = probed?.versionCode ?: -1L
+            return ResolvedApk(dest, emptyList(), "Cached Base APK (Reused)", ver, code)
         }
         return null
     }
@@ -147,10 +211,16 @@ object DownloadOrchestrator {
     fun cacheResolvedApk(context: Context, packageName: String, resolved: ResolvedApk) {
         try {
             if (!isApkValid(resolved.baseApk, requireCleanBase = true)) return
-            if (resolved.splits.isEmpty() && apkRequiresSplits(resolved.baseApk)) return
+            if (resolved.splits.isEmpty() && apkRequiresSplits(resolved.baseApk)) {
+                android.util.Log.w("DownloadOrchestrator", "Refusing to cache split-requiring base APK without companion splits for $packageName")
+                return
+            }
 
+            // Always key cache by true manifest versionName so a mismatched APK never poisons another version's cache
+            val probed = probeApkMetadata(resolved.baseApk)
+            val authoritativeVer = probed?.versionName?.takeIf { it.isNotBlank() } ?: resolved.resolvedVersion
             val cacheDir = getBaseCacheDir(context, packageName)
-            val cleanVer = resolved.resolvedVersion.ifBlank { "latest" }.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+            val cleanVer = authoritativeVer.ifBlank { "latest" }.replace(Regex("[^a-zA-Z0-9._-]"), "_")
             val bundleDir = File(cacheDir, "bundle_$cleanVer")
             if (bundleDir.exists()) bundleDir.deleteRecursively()
             bundleDir.mkdirs()
@@ -172,13 +242,20 @@ object DownloadOrchestrator {
     private fun isCompletePackage(resolved: ResolvedApk?): Boolean {
         if (resolved == null) return false
         if (!isApkValid(resolved.baseApk, requireCleanBase = true)) return false
-        if (resolved.splits.isEmpty() && apkRequiresSplits(resolved.baseApk)) return false
+        if (resolved.splits.isEmpty() && apkRequiresSplits(resolved.baseApk)) {
+            android.util.Log.w("DownloadOrchestrator", "Incomplete package: base requires splits (${resolved.baseApk.name}) but splits list is empty")
+            if (resolved.baseApk.parentFile?.name?.startsWith("bundle_") == true) {
+                resolved.baseApk.parentFile?.deleteRecursively()
+            }
+            return false
+        }
         return true
     }
 
     /**
-     * Resolves and downloads base APK for [packageName] and [versionName] into [targetDir].
-     * Avoids re-downloading if already cached/downloaded, and cleans older versions automatically.
+     * Resolves and downloads base APK for [packageName] and [requestedVersion] into [targetDir].
+     * Enforces strict two-pass version matching against actual APK manifest metadata so a
+     * mismatched "latest" build never silently poisons the cache or runs against version-locked patches.
      */
     suspend fun resolveAndDownload(
         context: Context,
@@ -187,9 +264,30 @@ object DownloadOrchestrator {
         requestedVersion: String,
         sourcePath: String? = null,
         targetDir: File,
+        targetVersionCode: Long? = null,
+        allowNearestFallback: Boolean = false,
         onProgress: (stage: String, percent: Int) -> Unit
     ): ResolvedApk? = withContext(Dispatchers.IO) {
         targetDir.mkdirs()
+
+        val isSpecificVer = isSpecificVersionRequest(requestedVersion)
+        var nearestFallback: ResolvedApk? = null
+
+        fun considerCandidate(candidate: ResolvedApk?): ResolvedApk? {
+            if (!isCompletePackage(candidate)) return null
+            val resolved = candidate!!
+            if (!isSpecificVer || versionsMatch(resolved.resolvedVersion, requestedVersion)) {
+                return resolved
+            }
+            android.util.Log.w(
+                "DownloadOrchestrator",
+                "Skipping mismatched version from ${resolved.sourceProvider}: got v${resolved.resolvedVersion} (${resolved.resolvedVersionCode}), wanted v$requestedVersion"
+            )
+            if (allowNearestFallback && nearestFallback == null) {
+                nearestFallback = resolved
+            }
+            return null
+        }
 
         // Priority 0: User-provided local APK from device storage
         if (!sourcePath.isNullOrBlank()) {
@@ -197,22 +295,68 @@ object DownloadOrchestrator {
             if (src.exists() && isApkValid(src)) {
                 onProgress("Using user-provided local APK...", 10)
                 val resolved = normalizeApkBundle(src, targetDir, "User Provided Local APK", "Local")
-                cacheResolvedApk(context, packageName, resolved)
-                return@withContext resolved
+                if (isCompletePackage(resolved)) {
+                    cacheResolvedApk(context, packageName, resolved)
+                    return@withContext resolved
+                }
             }
         }
 
-        // Step 0: Check if currently installed app on device matches requested version
+        // Step 0: Check untouched Download/OrionStore/<App>/untouched/ folder FIRST
+        val untouchedDir = runCatching { OrionStorageManager.getUntouchedDir(appName, packageName) }.getOrNull()
+        if (untouchedDir != null && untouchedDir.exists()) {
+            val cleanReqTag = requestedVersion.trim().removePrefix("v").lowercase()
+            val untouchedApk = untouchedDir.listFiles()
+                ?.filter { it.isFile && it.extension.lowercase() in setOf("apk", "xapk", "apkm", "apks") && isApkValid(it, requireCleanBase = true) }
+                ?.firstOrNull { f ->
+                    if (!isSpecificVer) true else f.name.lowercase().contains(cleanReqTag)
+                }
+            if (untouchedApk != null) {
+                val quickMeta = if (untouchedApk.extension.equals("apk", true)) probeApkMetadata(untouchedApk) else null
+                val matchesManifest = !isSpecificVer || quickMeta == null || quickMeta.versionName.isBlank() ||
+                    versionsMatch(quickMeta.versionName, requestedVersion)
+                if (matchesManifest) {
+                    val savedSplits = File(untouchedDir, "splits").listFiles()
+                        ?.filter { it.isFile && it.extension.equals("apk", true) && isApkValid(it) }
+                        ?.sortedBy { it.name }
+                        .orEmpty()
+                    onProgress("Using saved untouched APK from OrionStore/${untouchedDir.parentFile?.name}...", 10)
+                    val dest = File(targetDir, untouchedApk.name)
+                    untouchedApk.copyTo(dest, overwrite = true)
+                    val resolved = if (untouchedApk.extension.equals("apk", true) && savedSplits.isNotEmpty()) {
+                        val meta = probeApkMetadata(dest)
+                        ResolvedApk(
+                            baseApk = dest,
+                            splits = savedSplits.mapIndexed { idx, sf ->
+                                File(targetDir, "untouched_split_$idx.apk").also { sf.copyTo(it, overwrite = true) }
+                            },
+                            sourceProvider = "OrionStore Untouched Folder",
+                            resolvedVersion = meta?.versionName?.takeIf { it.isNotBlank() } ?: requestedVersion.ifBlank { "Saved" },
+                            resolvedVersionCode = meta?.versionCode ?: -1L
+                        )
+                    } else {
+                        normalizeApkBundle(dest, targetDir, "OrionStore Untouched Folder", requestedVersion.ifBlank { "Saved" })
+                    }
+                    considerCandidate(resolved)?.let { return@withContext it }
+                } else {
+                    android.util.Log.w(
+                        "DownloadOrchestrator",
+                        "Ignoring poisoned untouched file ${untouchedApk.name}: actual manifest v${quickMeta?.versionName} != requested v$requestedVersion"
+                    )
+                }
+            }
+        }
+
+        // Step 0b: Check if currently installed app on device is UNPATCHED (not in PatchedAppStore & not Orion-signed) and matches requested version
         val pm = context.packageManager
-        val installedPkgInfo = runCatching { pm.getPackageInfo(packageName, 0) }.getOrNull()
-        if (installedPkgInfo != null) {
+        val isTrackedPatched = runCatching {
+            com.orion.store.morphe.store.PatchedAppStore.apps.value.any { it.packageName.equals(packageName, ignoreCase = true) }
+        }.getOrDefault(false)
+        val installedPkgInfo = if (!isTrackedPatched) runCatching { pm.getPackageInfo(packageName, 0) }.getOrNull() else null
+        if (installedPkgInfo != null && !isSignedByMorpheKeystore(pm, packageName)) {
             val installedVer = installedPkgInfo.versionName ?: ""
-            val cleanReq = requestedVersion.trim().removePrefix("v").lowercase()
-            val cleanInst = installedVer.trim().removePrefix("v").lowercase()
-            val isMatch = requestedVersion.isBlank() ||
-                cleanReq == "recommended" ||
-                cleanReq == "latest" ||
-                cleanReq == cleanInst
+            val installedCode = PackageInfoCompat.getLongVersionCode(installedPkgInfo)
+            val isMatch = !isSpecificVer || versionsMatch(installedVer, requestedVersion)
             val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
             if (isMatch && appInfo != null && File(appInfo.sourceDir).exists()) {
                 onProgress("Extracting installed base APK from device (v$installedVer)...", 15)
@@ -227,7 +371,7 @@ object DownloadOrchestrator {
                         splits.add(targetSplit)
                     }
                 }
-                val extracted = ResolvedApk(base, splits, "Device Extraction", installedVer)
+                val extracted = ResolvedApk(base, splits, "Device Extraction", installedVer, installedCode)
                 if (isCompletePackage(extracted)) {
                     cacheResolvedApk(context, packageName, extracted)
                     return@withContext extracted
@@ -235,43 +379,38 @@ object DownloadOrchestrator {
             }
         }
 
-        // Step 1: Check persistent base APK cache (DO NOT REDOWNLOAD if already downloaded!)
+        // Step 1: Check persistent base APK cache (DO NOT REDOWNLOAD if already downloaded & version matches!)
         onProgress("Checking local APK cache...", 8)
-        val cachedResult = resolveFromBaseCache(context, packageName, requestedVersion, targetDir)
-        if (isCompletePackage(cachedResult)) {
+        considerCandidate(resolveFromBaseCache(context, packageName, requestedVersion, targetDir))?.let { cachedResult ->
             onProgress("Reusing already downloaded base APK...", 20)
             return@withContext cachedResult
         }
 
         // Step 2: Check local Downloads directory before hitting network
-        val localResult = resolveFromLocalDownloads(context, packageName, appName, targetDir)
-        if (isCompletePackage(localResult)) {
+        considerCandidate(resolveFromLocalDownloads(context, packageName, appName, requestedVersion, targetDir))?.let { localResult ->
             onProgress("Using APK found in Downloads...", 20)
-            cacheResolvedApk(context, packageName, localResult!!)
+            cacheResolvedApk(context, packageName, localResult)
             return@withContext localResult
         }
 
         // Tier 1: Orion Store Native Downloader
         onProgress("Checking Orion Store repository...", 12)
-        val orionResult = resolveFromOrionStore(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(orionResult)) {
-            cacheResolvedApk(context, packageName, orionResult!!)
+        considerCandidate(resolveFromOrionStore(packageName, requestedVersion, targetDir, onProgress))?.let { orionResult ->
+            cacheResolvedApk(context, packageName, orionResult)
             return@withContext orionResult
         }
 
         // Tier 2: MorpheFlow Base APK Cascade
         // Fallback 1: GitHub Official Releases (for open-source apps like Brave Browser)
-        val githubResult = resolveFromGitHubReleases(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(githubResult)) {
-            cacheResolvedApk(context, packageName, githubResult!!)
+        considerCandidate(resolveFromGitHubReleases(packageName, requestedVersion, targetDir, onProgress))?.let { githubResult ->
+            cacheResolvedApk(context, packageName, githubResult)
             return@withContext githubResult
         }
 
         // Fallback 2: Google Play (goopdl / GPlay API)
         onProgress("Resolving from Google Play (goopdl)...", 25)
-        val gplayResult = resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(gplayResult)) {
-            cacheResolvedApk(context, packageName, gplayResult!!)
+        considerCandidate(resolveFromGooglePlay(packageName, requestedVersion, targetDir, onProgress))?.let { gplayResult ->
+            cacheResolvedApk(context, packageName, gplayResult)
             return@withContext gplayResult
         }
 
@@ -283,63 +422,97 @@ object DownloadOrchestrator {
             targetDir = targetDir,
             onProgress = onProgress
         )
-        if (apkmirrorResult != null && isCompletePackage(apkmirrorResult)) {
-            cacheResolvedApk(context, packageName, apkmirrorResult.resolvedVersion, apkmirrorResult)
-            return@withContext apkmirrorResult
+        considerCandidate(apkmirrorResult)?.let { matched ->
+            cacheResolvedApk(context, packageName, matched)
+            return@withContext matched
         }
 
-        // Fallback 3: APKPure Direct CDN (reliable for Instagram, Brave, Proton, etc.)
+        // Fallback 3: APKPure Direct CDN (resolves versionCode generically via /versions for exact builds!)
         onProgress("Resolving from APKPure repository...", 35)
-        val apkPureResult = resolveFromApkPure(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(apkPureResult)) {
-            cacheResolvedApk(context, packageName, apkPureResult!!)
-            return@withContext apkPureResult
+        val apkPureResult = resolveFromApkPure(
+            packageName = packageName,
+            versionName = requestedVersion,
+            targetDir = targetDir,
+            onProgress = onProgress,
+            requestedVersionCode = targetVersionCode,
+            allowLatestFallback = !isSpecificVer
+        )
+        considerCandidate(apkPureResult)?.let { matched ->
+            cacheResolvedApk(context, packageName, matched)
+            return@withContext matched
         }
 
-        // Fallback 4: Aptoide Public API (generalised for 99.9% of apps worldwide)
+        // Fallback 4: Aptoide Public API
         onProgress("Resolving from Aptoide repository...", 45)
-        val aptoideResult = resolveFromAptoide(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(aptoideResult)) {
-            cacheResolvedApk(context, packageName, aptoideResult!!)
-            return@withContext aptoideResult
+        val aptoideResult = resolveFromAptoide(
+            packageName = packageName,
+            versionName = requestedVersion,
+            targetDir = targetDir,
+            onProgress = onProgress,
+            allowLatestFallback = !isSpecificVer
+        )
+        considerCandidate(aptoideResult)?.let { matched ->
+            cacheResolvedApk(context, packageName, matched)
+            return@withContext matched
         }
 
         // Fallback 5: Uptodown Resolver
         onProgress("Resolving from Uptodown repository...", 60)
-        val uptodownResult = resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(uptodownResult)) {
-            cacheResolvedApk(context, packageName, uptodownResult!!)
-            return@withContext uptodownResult
+        considerCandidate(resolveFromUptodown(packageName, requestedVersion, targetDir, onProgress))?.let { matched ->
+            cacheResolvedApk(context, packageName, matched)
+            return@withContext matched
         }
 
         // Fallback 6: APKCombo Resolver
         onProgress("Resolving from APKCombo repository...", 75)
-        val apkComboResult = resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress)
-        if (isCompletePackage(apkComboResult)) {
-            cacheResolvedApk(context, packageName, apkComboResult!!)
-            return@withContext apkComboResult
+        considerCandidate(resolveFromApkCombo(packageName, requestedVersion, targetDir, onProgress))?.let { matched ->
+            cacheResolvedApk(context, packageName, matched)
+            return@withContext matched
         }
 
-        // Fallback 7: If app is installed on device at any version, use it rather than failing
-        if (installedPkgInfo != null) {
-            val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
-            if (appInfo != null && File(appInfo.sourceDir).exists()) {
-                val installedVer = installedPkgInfo.versionName ?: ""
-                onProgress("Using installed version (v$installedVer)...", 90)
-                val base = File(targetDir, "base_extracted.apk")
-                File(appInfo.sourceDir).copyTo(base, overwrite = true)
-                val splits = mutableListOf<File>()
-                appInfo.splitSourceDirs?.forEachIndexed { idx, sPath ->
-                    val sf = File(sPath)
-                    if (sf.exists() && sf.length() > 0) {
-                        val targetSplit = File(targetDir, "split_${idx}.apk")
-                        sf.copyTo(targetSplit, overwrite = true)
-                        splits.add(targetSplit)
-                    }
+        // Pass 2: Nearest-version fallback (ONLY when user opted in or version wasn't pinned/specific)
+        if (allowNearestFallback) {
+            nearestFallback?.let { fb ->
+                if (isCompletePackage(fb)) {
+                    cacheResolvedApk(context, packageName, fb)
+                    return@withContext fb
                 }
-                val extracted = ResolvedApk(base, splits, "Device Extraction (Installed v$installedVer)", installedVer)
-                if (isCompletePackage(extracted)) {
-                    return@withContext extracted
+            }
+            if (isSpecificVer) {
+                val latestPure = resolveFromApkPure(
+                    packageName = packageName,
+                    versionName = "latest",
+                    targetDir = targetDir,
+                    onProgress = onProgress,
+                    requestedVersionCode = null,
+                    allowLatestFallback = true
+                )
+                if (isCompletePackage(latestPure)) {
+                    cacheResolvedApk(context, packageName, latestPure!!)
+                    return@withContext latestPure
+                }
+            }
+            if (installedPkgInfo != null) {
+                val appInfo = runCatching { pm.getApplicationInfo(packageName, 0) }.getOrNull()
+                if (appInfo != null && File(appInfo.sourceDir).exists()) {
+                    val installedVer = installedPkgInfo.versionName ?: ""
+                    val installedCode = PackageInfoCompat.getLongVersionCode(installedPkgInfo)
+                    onProgress("Using installed nearest version (v$installedVer)...", 90)
+                    val base = File(targetDir, "base_extracted.apk")
+                    File(appInfo.sourceDir).copyTo(base, overwrite = true)
+                    val splits = mutableListOf<File>()
+                    appInfo.splitSourceDirs?.forEachIndexed { idx, sPath ->
+                        val sf = File(sPath)
+                        if (sf.exists() && sf.length() > 0) {
+                            val targetSplit = File(targetDir, "split_${idx}.apk")
+                            sf.copyTo(targetSplit, overwrite = true)
+                            splits.add(targetSplit)
+                        }
+                    }
+                    val extracted = ResolvedApk(base, splits, "Device Extraction (Nearest v$installedVer)", installedVer, installedCode)
+                    if (isCompletePackage(extracted)) {
+                        return@withContext extracted
+                    }
                 }
             }
         }
@@ -533,37 +706,73 @@ object DownloadOrchestrator {
         }
     }
 
+    private fun resolveApkPureVersionCode(packageName: String, requestedVersion: String): Long? {
+        return runCatching {
+            val url = "https://apkpure.net/app/${URLEncoder.encode(packageName, "UTF-8")}/versions"
+            val req = Request.Builder()
+                .url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0")
+                .build()
+            downloadClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@runCatching null
+                val html = resp.body.string()
+                parseApkPureVersionCodeFromHtml(html, requestedVersion)
+            }
+        }.getOrNull()
+    }
+
     private suspend fun resolveFromApkPure(
         packageName: String,
         versionName: String,
         targetDir: File,
-        onProgress: (String, Int) -> Unit
+        onProgress: (String, Int) -> Unit,
+        requestedVersionCode: Long? = null,
+        allowLatestFallback: Boolean = false
     ): ResolvedApk? {
         return try {
             val targetFile = File(targetDir, "apkpure_${packageName}.apk")
             val targetXapk = File(targetDir, "apkpure_${packageName}.xapk")
             val cleanVer = versionName.trim().removePrefix("v")
-            val isSpecificVer = cleanVer.isNotBlank() &&
-                !cleanVer.equals("recommended", ignoreCase = true) &&
-                !cleanVer.equals("latest", ignoreCase = true)
+            val isSpecificVer = isSpecificVersionRequest(cleanVer)
 
-            // 1. Try specific version APK/XAPK if requested
+            // 1. Resolve exact versionCode (from .mpp metadata or APKPure /versions index) for reliable exact downloads
             if (isSpecificVer) {
+                val resolvedCode = requestedVersionCode?.takeIf { it > 0L }
+                    ?: resolveApkPureVersionCode(packageName, cleanVer)
+                if (resolvedCode != null) {
+                    val codeXapk = "https://d.apkpure.net/b/XAPK/$packageName?versionCode=$resolvedCode"
+                    if (downloadFile(codeXapk, targetXapk, onProgress, 20, 35) && isApkValid(targetXapk, requireCleanBase = true)) {
+                        val norm = normalizeApkBundle(targetXapk, targetDir, "APKPure (XAPK v$cleanVer #$resolvedCode)", cleanVer)
+                        if (isCompletePackage(norm) && versionsMatch(norm.resolvedVersion, cleanVer)) return norm
+                        targetXapk.delete()
+                    }
+                    val codeApk = "https://d.apkpure.net/b/APK/$packageName?versionCode=$resolvedCode"
+                    if (downloadFile(codeApk, targetFile, onProgress, 20, 35) && isApkValid(targetFile, requireCleanBase = true)) {
+                        val norm = normalizeApkBundle(targetFile, targetDir, "APKPure (v$cleanVer #$resolvedCode)", cleanVer)
+                        if (isCompletePackage(norm) && versionsMatch(norm.resolvedVersion, cleanVer)) return norm
+                        targetFile.delete()
+                    }
+                }
+
                 val specApk = "https://d.apkpure.net/b/APK/$packageName?version=$cleanVer"
                 if (downloadFile(specApk, targetFile, onProgress, 20, 35) && isApkValid(targetFile, requireCleanBase = true)) {
                     val norm = normalizeApkBundle(targetFile, targetDir, "APKPure (v$cleanVer)", cleanVer)
-                    if (isCompletePackage(norm)) return norm
+                    if (isCompletePackage(norm) && versionsMatch(norm.resolvedVersion, cleanVer)) return norm
                     targetFile.delete()
                 }
                 val specXapk = "https://d.apkpure.net/b/XAPK/$packageName?version=$cleanVer"
                 if (downloadFile(specXapk, targetXapk, onProgress, 20, 35) && isApkValid(targetXapk, requireCleanBase = true)) {
                     val norm = normalizeApkBundle(targetXapk, targetDir, "APKPure (XAPK v$cleanVer)", cleanVer)
-                    if (isCompletePackage(norm)) return norm
+                    if (isCompletePackage(norm) && versionsMatch(norm.resolvedVersion, cleanVer)) return norm
                     targetXapk.delete()
                 }
             }
 
-            // 2. Try latest APK endpoint from APKPure CDN (note: APKPure often serves an XAPK from /b/APK/)
+            if (isSpecificVer && !allowLatestFallback) {
+                return null
+            }
+
+            // 2. Try latest APK/XAPK endpoints only when latest was requested or nearest fallback is allowed
             val apkUrl = "https://d.apkpure.net/b/APK/$packageName?version=latest"
             if (downloadFile(apkUrl, targetFile, onProgress, 20, 35) && isApkValid(targetFile, requireCleanBase = true)) {
                 val norm = normalizeApkBundle(targetFile, targetDir, "APKPure", versionName.ifBlank { "Latest" })
@@ -571,7 +780,6 @@ object DownloadOrchestrator {
                 targetFile.delete()
             }
 
-            // 3. Try latest XAPK bundle endpoint if APK was absent or missing required splits
             val xapkUrl = "https://d.apkpure.net/b/XAPK/$packageName?version=latest"
             if (downloadFile(xapkUrl, targetXapk, onProgress, 20, 35) && isApkValid(targetXapk, requireCleanBase = true)) {
                 val norm = normalizeApkBundle(targetXapk, targetDir, "APKPure (XAPK)", versionName.ifBlank { "Latest" })
@@ -589,7 +797,8 @@ object DownloadOrchestrator {
         packageName: String,
         versionName: String,
         targetDir: File,
-        onProgress: (String, Int) -> Unit
+        onProgress: (String, Int) -> Unit,
+        allowLatestFallback: Boolean = false
     ): ResolvedApk? = withContext(Dispatchers.IO) {
         try {
             val headers = Headers.Builder()
@@ -642,7 +851,7 @@ object DownloadOrchestrator {
                     }
                 }
 
-                if (downloadUrl.isNullOrBlank() && !latestPath.isNullOrBlank()) {
+                if (downloadUrl.isNullOrBlank() && (!isSpecificVer || allowLatestFallback) && !latestPath.isNullOrBlank()) {
                     downloadUrl = latestPath
                     resolvedVer = latestVer.ifBlank { "Latest" }
                 }
@@ -661,10 +870,11 @@ object DownloadOrchestrator {
                     } ?: emptyList()
 
                     val targetItem = if (isSpecificVer) {
-                        matchedItems.firstOrNull {
+                        val exactItem = matchedItems.firstOrNull {
                             val v = it["file"]?.jsonObject?.get("vername")?.jsonPrimitive?.contentOrNull ?: ""
-                            v.equals(cleanVer, ignoreCase = true) || v.startsWith(cleanVer)
-                        } ?: matchedItems.firstOrNull()
+                            versionsMatch(v, cleanVer) || v.startsWith(cleanVer, ignoreCase = true)
+                        }
+                        exactItem ?: if (allowLatestFallback) matchedItems.firstOrNull() else null
                     } else {
                         matchedItems.firstOrNull()
                     }
@@ -698,7 +908,18 @@ object DownloadOrchestrator {
     fun hasLocalBaseApk(context: Context, packageName: String): Boolean {
         if (runCatching { context.packageManager.getPackageInfo(packageName, 0) }.isSuccess) return true
         val cacheDir = File(context.filesDir, "base_apk_cache/$packageName")
-        if (cacheDir.exists() && cacheDir.listFiles()?.any { isApkValid(it) } == true) return true
+        if (cacheDir.exists()) {
+            val hasValidBundle = cacheDir.listFiles()?.any { entry ->
+                if (entry.isDirectory && entry.name.startsWith("bundle_")) {
+                    val base = File(entry, "base.apk")
+                    val splits = File(entry, "splits").listFiles()?.filter { it.isFile && it.extension.equals("apk", true) }.orEmpty()
+                    base.exists() && isApkValid(base, requireCleanBase = true) && (splits.isNotEmpty() || !apkRequiresSplits(base))
+                } else {
+                    entry.isFile && isApkValid(entry, requireCleanBase = true) && !apkRequiresSplits(entry)
+                }
+            } == true
+            if (hasValidBundle) return true
+        }
         val searchDirs = listOfNotNull(
             Downloads.dir(),
             android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
@@ -712,16 +933,42 @@ object DownloadOrchestrator {
                 !name.startsWith("patched_") &&
                 !name.contains("_patched") &&
                 name.contains(packageName.lowercase()) &&
-                isApkValid(file)
+                isApkValid(file) &&
+                (ext != "apk" || !apkRequiresSplits(file))
             } == true) return true
         }
         return false
+    }
+
+    private fun isSignedByMorpheKeystore(pm: android.content.pm.PackageManager, packageName: String): Boolean {
+        return runCatching {
+            val keystoreDigests = com.orion.store.morphe.store.KeyStoreManager.getKeySha256Fingerprints()
+            if (keystoreDigests.isEmpty()) return false
+            val pkgInfo = if (Build.VERSION.SDK_INT >= 28) {
+                pm.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(packageName, android.content.pm.PackageManager.GET_SIGNATURES)
+            }
+            val sigs = if (Build.VERSION.SDK_INT >= 28) {
+                pkgInfo.signingInfo?.apkContentsSigners ?: pkgInfo.signingInfo?.signingCertificateHistory
+            } else {
+                @Suppress("DEPRECATION")
+                pkgInfo.signatures
+            } ?: return false
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            sigs.any { sig ->
+                val hex = md.digest(sig.toByteArray()).joinToString("") { "%02x".format(it) }
+                hex in keystoreDigests
+            }
+        }.getOrDefault(false)
     }
 
     private fun resolveFromLocalDownloads(
         context: Context,
         packageName: String,
         appName: String,
+        requestedVersion: String,
         targetDir: File
     ): ResolvedApk? {
         return try {
@@ -729,27 +976,34 @@ object DownloadOrchestrator {
                 Downloads.dir(),
                 android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
             )
+            val isSpecificVer = isSpecificVersionRequest(requestedVersion)
+            val cleanReq = requestedVersion.trim().removePrefix("v").lowercase()
 
             for (dir in searchDirs) {
                 if (!dir.exists()) continue
-                val candidate = dir.listFiles()?.firstOrNull { file ->
+                val matching = dir.listFiles()?.filter { file ->
                     val ext = file.extension.lowercase()
                     val name = file.name.lowercase()
                     (ext in setOf("apk", "xapk", "apkm", "apks")) &&
-                    !name.startsWith("patched_") &&
-                    !name.contains("_patched") &&
-                    (
-                        name.contains(packageName.lowercase()) ||
-                        name.contains(appName.lowercase().replace(" ", ""))
-                    ) &&
-                    isApkValid(file, requireCleanBase = true)
+                        !name.startsWith("patched_") &&
+                        !name.contains("_patched") &&
+                        (
+                            name.contains(packageName.lowercase()) ||
+                                name.contains(appName.lowercase().replace(" ", ""))
+                            ) &&
+                        isApkValid(file, requireCleanBase = true)
+                }.orEmpty().sortedByDescending { f ->
+                    if (isSpecificVer && f.name.lowercase().contains(cleanReq)) 1 else 0
                 }
 
-                if (candidate != null && candidate.exists()) {
+                for (candidate in matching) {
                     val dest = File(targetDir, candidate.name)
                     candidate.copyTo(dest, overwrite = true)
                     if (isApkValid(dest, requireCleanBase = true)) {
-                        return normalizeApkBundle(dest, targetDir, "Local Downloads (${dir.name})", "Local")
+                        val norm = normalizeApkBundle(dest, targetDir, "Local Downloads (${dir.name})", "Local")
+                        if (!isSpecificVer || versionsMatch(norm.resolvedVersion, requestedVersion)) {
+                            return norm
+                        }
                     }
                 }
             }
@@ -911,22 +1165,22 @@ object DownloadOrchestrator {
             java.util.zip.ZipFile(bundleFile).use { it.getEntry("AndroidManifest.xml") != null }
         }.getOrDefault(bundleFile.extension.equals("apk", ignoreCase = true))
 
-        fun readRealVersion(apk: File, fallback: String): String {
+        fun readRealMeta(apk: File, fallback: String): Pair<String, Long> {
             val clean = fallback.trim()
-            val needsProbe = clean.isBlank() || clean.equals("latest", true) || clean.equals("recommended", true) || clean.equals("local", true)
-            if (!needsProbe) return clean
-            val probed = runCatching {
-                com.orion.store.OrionApp.instance.packageManager.getPackageArchiveInfo(apk.absolutePath, 0)?.versionName
-            }.getOrNull()
-            return probed?.takeIf { it.isNotBlank() } ?: clean.ifBlank { "Latest" }
+            val probed = probeApkMetadata(apk)
+            val realVer = probed?.versionName?.takeIf { it.isNotBlank() } ?: clean.ifBlank { "Latest" }
+            val realCode = probed?.versionCode ?: -1L
+            return realVer to realCode
         }
 
         if (hasRootManifest) {
+            val (realVer, realCode) = readRealMeta(bundleFile, version)
             return ResolvedApk(
                 baseApk = bundleFile,
                 splits = emptyList(),
                 sourceProvider = provider,
-                resolvedVersion = readRealVersion(bundleFile, version)
+                resolvedVersion = realVer,
+                resolvedVersionCode = realCode
             )
         }
 
@@ -940,11 +1194,13 @@ object DownloadOrchestrator {
                 n == "base.apk" || (!n.contains("split") && !n.contains("config.") && !n.contains("config_"))
             } ?: parts.first()
             val splits = parts.filter { it.absolutePath != base.absolutePath }
+            val (realVer, realCode) = readRealMeta(base, version)
             return ResolvedApk(
                 baseApk = base,
                 splits = splits,
                 sourceProvider = "$provider (Normalized Splits)",
-                resolvedVersion = readRealVersion(base, version)
+                resolvedVersion = realVer,
+                resolvedVersionCode = realCode
             )
         }
 

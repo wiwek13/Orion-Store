@@ -127,6 +127,8 @@ import kotlin.math.max
     val autoPatchApps: Map<String, Boolean> = emptyMap(),
     val autoPatchGlobal: Boolean = true,
     val autoInstallPatchedGlobal: Boolean = true,
+    val skipFailingPatches: Boolean = true,
+    val allowNearestApkVersion: Boolean = false,
     val savedPatchSelections: Map<String, List<String>> = emptyMap(),
     val installedVersions: Map<String, String> = emptyMap(),
     val lastRemoteVersions: Map<String, String> = emptyMap(),
@@ -206,6 +208,8 @@ import kotlin.math.max
     fun ignoreUpdate(id: String, type: String, version: String?, now: Long) = copy(ignoredUpdates = ignoredUpdates + (id to IgnoredUpdate(type, now, version)))
     /** Stores an override only when it differs from what the store filter would decide. */
     fun withManaged(id: String, on: Boolean) = copy(appManage = appManage - id).let { if (isManaged(id, it) == on) it else it.copy(appManage = appManage + (id to on)) }
+    fun withPackagesManaged(keys: Iterable<String>): Settings =
+        keys.distinct().fold(this) { acc, key -> acc.withManaged(key, true) }
     fun withProfile(p: UserProfile?, now: Long) = copy(userProfile = p?.copy(createdAt = userProfile?.createdAt ?: now))
     fun removeCustomFont(id: String) = copy(customFonts = customFonts.filterNot { it.id == id }, appFont = if (appFont == "custom:$id") "spaceGrotesk" else appFont)
     fun toggleBundleAppRemoval(bundleId: String, appId: String): Settings {

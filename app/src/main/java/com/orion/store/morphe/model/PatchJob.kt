@@ -41,7 +41,10 @@ data class PatchJobParams(
     val patchOptions: Map<String, String> = emptyMap(),
     val signingKeyAlias: String = "morphe-default",
     val autoInstall: Boolean = true
-)
+) {
+    fun effectivePackageName(): String =
+        patchOptions["clonePackageName"]?.trim()?.takeIf { it.isNotEmpty() } ?: packageName
+}
 
 /**
  * Persistent Job Entity representing a single build/patch task.

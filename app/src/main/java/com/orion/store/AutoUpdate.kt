@@ -191,6 +191,11 @@ object AutoUpdate {
 
     /** Opens the app's page with the file ready, the same extras the store's own "ready" notification uses. */
     private fun notifyReady(ctx: Context, app: AppItem, file: String, error: String? = null) = runCatching {
+        if (Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return@runCatching
         channel(ctx)
         val i = Intent(ctx, OrionActivity::class.java).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("appId", app.id).putExtra("fileName", file)
         NotificationManagerCompat.from(ctx).notify(app.id.hashCode(), NotificationCompat.Builder(ctx, CHANNEL).setSmallIcon(android.R.drawable.stat_sys_download_done)
@@ -201,6 +206,11 @@ object AutoUpdate {
 
     private fun notifySummary(ctx: Context, log: List<AutoResult>) = runCatching {
         val ok = log.filter { it.ok }; if (ok.isEmpty()) return@runCatching
+        if (Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return@runCatching
         channel(ctx)
         val launch = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
         NotificationManagerCompat.from(ctx).notify(JOB_ID, NotificationCompat.Builder(ctx, CHANNEL).setSmallIcon(com.orion.store.R.drawable.ic_launcher_monochrome)

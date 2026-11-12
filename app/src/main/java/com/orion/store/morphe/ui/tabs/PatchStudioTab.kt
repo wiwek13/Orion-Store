@@ -59,7 +59,6 @@ import com.orion.store.morphe.model.PatchJobParams
 import com.orion.store.morphe.store.JobStore
 import com.orion.store.morphe.store.KeyStoreManager
 import com.orion.store.morphe.store.MorpheRepoStore
-import com.orion.store.morphe.worker.PatchJobRunner
 import com.orion.store.ui.H
 import com.orion.store.ui.MainViewModel
 import com.orion.store.ui.Sym
@@ -106,8 +105,7 @@ fun PatchStudioTab(vm: MainViewModel) {
                         signingKeyAlias = selectedKeyAlias,
                         autoInstall = autoInstall
                     )
-                    val job = JobStore.enqueue(params)
-                    PatchJobRunner.runJob(job, context)
+                    vm.enqueuePatchJob(params, saveSelections = false)
                     // Navigate directly to Queue tab so user sees live progress
                     vm.navTo(Tab.PATCH_QUEUE)
                 },

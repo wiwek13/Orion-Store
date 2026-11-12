@@ -29,6 +29,7 @@ on:
 
 permissions:
   contents: write
+  packages: read
 
 jobs:
   build:
@@ -74,6 +75,8 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build APKs (Release & Debug)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./gradlew :app:assembleRelease :app:assembleDebug --no-daemon
 
       - name: Prepare Release Artifacts

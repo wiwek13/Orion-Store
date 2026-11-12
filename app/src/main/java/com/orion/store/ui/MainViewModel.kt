@@ -185,7 +185,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var loadGen = 0; private var syncJob: Job? = null; private var cleaning = false
     private var devClicks = 0; private var eggClicks = 0
 
-    fun allApps() = d.apps + d.importedApps + orbitItems()
+    private var allAppsMemo: Triple<List<AppItem>, List<AppItem>, List<OrbitApp>>? = null
+    private var allAppsCached: List<AppItem> = emptyList()
+    fun allApps(): List<AppItem> {
+        val a = d.apps
+        val i = d.importedApps
+        val o = d.orbit
+        val prev = allAppsMemo
+        if (prev != null && prev.first === a && prev.second === i && prev.third === o) return allAppsCached
+        val merged = a + i + orbitItems()
+        allAppsMemo = Triple(a, i, o)
+        allAppsCached = merged
+        return merged
+    }
 
     /** Orbit entries as store items, rebuilt only when the Orbit list itself changes. */
     private var orbitMemo: Pair<List<OrbitApp>, List<AppItem>> = emptyList<OrbitApp>() to emptyList()
@@ -729,6 +741,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private fun notifyReady(app: AppItem, file: String) = runCatching {
+        if (Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) return@runCatching
         val i = Intent(ctx, OrionActivity::class.java).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("appId", app.id).putExtra("fileName", file)
         NotificationManagerCompat.from(ctx).notify(app.id.hashCode(), NotificationCompat.Builder(ctx, "orion_updates").setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("Download Complete").setContentText("${app.name} is ready to install.").setAutoCancel(true)
@@ -740,7 +757,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val ch = questChapter(s.adWatchCount); if (ch <= s.questChapterSeen) return
         set { it.copy(questChapterSeen = ch) }
         val nm = NotificationManagerCompat.from(ctx)
-        if (!nm.areNotificationsEnabled()) { queue { toast("New mission: Chapter 2 · The Forkening", 8000, "Play") { open(Overlay.AD_DONATION) } }; return }
+        if (!nm.areNotificationsEnabled() || (Build.VERSION.SDK_INT >= 33 && androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.POST_NOTIFICATIONS
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+        ) { queue { toast("New mission: Chapter 2 · The Forkening", 8000, "Play") { open(Overlay.AD_DONATION) } }; return }
         nm.createNotificationChannel(NotificationChannelCompat.Builder("orion_quest", NotificationManagerCompat.IMPORTANCE_DEFAULT).setName("Fuel the Code missions").build())
         val i = Intent(ctx, OrionActivity::class.java).setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP).putExtra("open", "quest")
         runCatching {
@@ -871,34 +892,87 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun showInFolder(file: File? = null) {
         viewModelScope.launch(Dispatchers.Main) {
-            val target = file?.takeIf { it.exists() } ?: com.orion.store.platform.Downloads.dir()
-            var folderOpened = false
+            com.orion.store.platform.OrionStorageManager.migrateLegacyDownloads()
+            val root = com.orion.store.platform.OrionStorageManager.getOrionStoreRootDir()
+            val targetFolder = when {
+                file != null && file.isDirectory && !file.absolutePath.contains("Android/data") -> file
+                file != null && file.isFile -> {
+                    if (file.parentFile != null && !file.parentFile!!.absolutePath.contains("Android/data") && file.parentFile!!.exists() && file.parentFile != root) {
+                        file.parentFile!!
+                    } else {
+                        val raw = file.name.removePrefix("Patched_")
+                        val appPart = if ("_v" in raw) raw.substringBefore("_v") else raw.substringBeforeLast(".")
+                        com.orion.store.platform.OrionStorageManager.getAppDir(appPart.replace("_", " "), "")
+                    }
+                }
+                file != null && file.parentFile != null && !file.parentFile!!.absolutePath.contains("Android/data") && file.parentFile!!.exists() -> file.parentFile!!
+                else -> root
+            }
+            targetFolder.mkdirs()
+
+            // 1. Open directly via Android SAF DocumentsUI (proven to land inside exact Download/OrionStore/<AppName> on Galaxy S25 Ultra / Android)
             try {
-                val downloadDirUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload")
-                val folderIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(downloadDirUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                val extRoot = android.os.Environment.getExternalStorageDirectory().absolutePath.trimEnd('/')
+                val rawPath = targetFolder.absolutePath
+                val relPath = when {
+                    rawPath.startsWith("/storage/emulated/0/") -> rawPath.removePrefix("/storage/emulated/0/")
+                    rawPath.startsWith("$extRoot/") -> rawPath.removePrefix("$extRoot/")
+                    rawPath.startsWith("/sdcard/") -> rawPath.removePrefix("/sdcard/")
+                    else -> "Download/OrionStore"
+                }.trim('/')
+                val encodedDocId = "primary:" + relPath.split("/").filter { it.isNotEmpty() }.joinToString("%2F") { Uri.encode(it) }
+                val docUri = Uri.parse("content://com.android.externalstorage.documents/document/$encodedDocId")
+                val docIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(docUri, DocumentsContract.Document.MIME_TYPE_DIR)
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
-                ctx.startActivity(folderIntent)
-                folderOpened = true
+                if (ctx.packageManager.resolveActivity(docIntent, 0) != null) {
+                    ctx.startActivity(docIntent)
+                    return@launch
+                }
+            } catch (_: Exception) {}
+
+            // 2. Fallback: Samsung My Files (if DocumentsUI unavailable)
+            try {
+                val samsungIntent = Intent(Intent.ACTION_VIEW).apply {
+                    component = android.content.ComponentName("com.sec.android.app.myfiles", "com.sec.android.app.myfiles.ui.MainActivity")
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", targetFolder.absolutePath)
+                    putExtra("current_path", targetFolder.absolutePath)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+                if (ctx.packageManager.resolveActivity(samsungIntent, 0) != null) {
+                    ctx.startActivity(samsungIntent)
+                    return@launch
+                }
             } catch (e: Exception) {
-                folderOpened = false
+                // fallback
             }
 
-            if (folderOpened) return@launch
-
+            // 2. Try Android SAF DocumentsUI (Google Files / System Files)
             try {
-                if (target.exists()) {
-                    val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", target)
-                    val mime = if (target.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else "*/*"
-                    val intent = Intent(Intent.ACTION_VIEW).apply {
-                        setDataAndType(uri, mime)
-                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-                    }
-                    ctx.startActivity(Intent.createChooser(intent, "Open with...").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                } else {
-                    toast("Download folder could not be located.")
+                val relPath = targetFolder.absolutePath.substringAfter("/storage/emulated/0/").trim('/')
+                val encodedDocId = "primary:" + relPath.split("/").joinToString("%2F") { Uri.encode(it) }
+                val docUri = Uri.parse("content://com.android.externalstorage.documents/document/$encodedDocId")
+                val docIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(docUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
+                if (ctx.packageManager.resolveActivity(docIntent, 0) != null) {
+                    ctx.startActivity(docIntent)
+                    return@launch
+                }
+            } catch (e: Exception) {
+                // fallback
+            }
+
+            // 3. Fallback: Generic Chooser with FileProvider
+            try {
+                val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.fileprovider", targetFolder)
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(Intent.createChooser(intent, "Open folder with...").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) {
                 e.printStackTrace()
                 toast("Could not open file manager: ${e.message}")
@@ -908,6 +982,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun installPatchedApk(job: PatchJob) = viewModelScope.launch(Dispatchers.IO) {
         val file = (job.outputApkPath?.let { java.io.File(it) })?.takeIf { it.exists() && DownloadOrchestrator.isApkValid(it) }
+            ?: com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(job.params.appName, job.params.packageName)
+                ?.takeIf { DownloadOrchestrator.isApkValid(it) }
             ?: runCatching {
                 val downloads = com.orion.store.platform.Downloads.dir()
                 val pkg = job.params.packageName
@@ -1024,13 +1100,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 needsAttention = false
             )
         )
+        val matchingKeys = (allApps()
+            .filter { it.packageName == realPkg || it.id == realPkg }
+            .map { it.id } + realPkg).distinct()
         Store.settings.update { s ->
             s.copy(
-                installedVersions = s.installedVersions + (realPkg to ver),
-                resolvedPackageNames = s.resolvedPackageNames + (realPkg to realPkg),
-                appManage = s.appManage + (realPkg to true)
-            )
+                installedVersions = s.installedVersions + matchingKeys.associateWith { ver },
+                resolvedPackageNames = s.resolvedPackageNames + matchingKeys.associateWith { realPkg }
+            ).withPackagesManaged(matchingKeys)
         }
+    }
+
+    /** Enqueues a Morphe patch job, ensuring previously hidden catalog/package entries immediately reappear in My Apps. */
+    fun enqueuePatchJob(
+        params: com.orion.store.morphe.model.PatchJobParams,
+        saveSelections: Boolean = true
+    ): PatchJob {
+        val effPkg = params.effectivePackageName()
+        val matchingKeys = (allApps()
+            .filter { it.packageName == effPkg || it.id == effPkg }
+            .map { it.id } + effPkg).distinct()
+        Store.settings.update { st ->
+            var next = st.withPackagesManaged(matchingKeys)
+            if (saveSelections && params.selectedPatchIds.isNotEmpty()) {
+                next = next.copy(savedPatchSelections = next.savedPatchSelections + (params.packageName to params.selectedPatchIds))
+            }
+            next
+        }
+        return com.orion.store.morphe.store.JobStore.enqueue(params)
     }
 
     fun requestUninstall(packageName: String) {
@@ -1128,6 +1225,24 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         upd { st -> installed.fold(st) { acc, (id, v, f) -> acc.recordInstalled(id, v, f, now) }.copy(readyToInstall = st.readyToInstall - doneReady, pendingCleanup = st.pendingCleanup + cleanup) }
         if (s.deleteApk) cleanup.forEach { (id, e) -> purgeApk(id, e.fileName) }
         if (remote.isNotEmpty() || owners.isNotEmpty()) set { it.copy(lastRemoteVersions = it.lastRemoteVersions + remote, packageOwners = it.packageOwners + owners) }
+
+        // Reconcile standalone/uninstalled PatchedAppStore entries so removed apps never leave stale banners
+        val patchedApps = com.orion.store.morphe.store.PatchedAppStore.apps.value
+        if (patchedApps.isNotEmpty()) {
+            val uninstalledPatched = withContext(Dispatchers.IO) {
+                patchedApps.filter { pa ->
+                    !tracker.appInfo(pa.packageName).installed &&
+                        com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(pa.appName, pa.packageName) == null
+                }
+            }
+            if (uninstalledPatched.isNotEmpty()) {
+                val gonePkgs = uninstalledPatched.map { it.packageName }.toSet()
+                uninstalledPatched.forEach { pa ->
+                    com.orion.store.morphe.store.PatchedAppStore.removeRecordOnly(pa.packageName)
+                }
+                set { st -> st.copy(installedVersions = st.installedVersions - gonePkgs) }
+            }
+        }
     }
 
     /** The support reminder: never before 3 apps, at most once every 10 days, and then only on a 1 in 3 chance per install, so it stays rare and unpredictable. */
@@ -1179,6 +1294,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (err != null) { error(err.message ?: "Uninstall failed"); return false }
         delay(300)
         if (withContext(Dispatchers.IO) { tracker.appInfo(pkg).installed }) return false
+        val origPkg = app.packageName ?: pkg
+        if (withContext(Dispatchers.IO) {
+                com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(app.name, pkg) == null &&
+                    com.orion.store.platform.OrionStorageManager.findPatchedApkForApp(app.name, origPkg) == null
+            }
+        ) {
+            com.orion.store.morphe.store.PatchedAppStore.removeRecordOnly(pkg)
+            if (origPkg != pkg) com.orion.store.morphe.store.PatchedAppStore.removeRecordOnly(origPkg)
+        }
+        set { st -> st.copy(installedVersions = st.installedVersions - app.id - pkg - origPkg) }
         syncApp(app).join(); return true
     }
 
@@ -1225,6 +1350,131 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val file = d.readyToInstall[app.id] ?: d.pendingCleanup[app.id]?.fileName ?: d.appLibrary[app.id]?.fileName
         if (!purgeApk(app.id, file)) { error("APK could not be deleted."); return }
         if (file != null) { set { it.copy(lastRemoteVersions = it.lastRemoteVersions - app.id) }; haptic(H.SUCCESS) }
+    }
+
+    /** Removes all patched builds, queue jobs, PatchedAppStore entries, and patcher caches for this app. */
+    fun removePatchedBuild(app: AppItem, pkg: String) = viewModelScope.launch {
+        haptic(H.MEDIUM)
+        val origPkg = app.packageName?.takeIf { it.isNotBlank() } ?: pkg
+        val freed = withContext(Dispatchers.IO) {
+            val allPkgs = setOf(pkg, origPkg, app.id).filter { it.isNotBlank() }
+            allPkgs.forEach { p ->
+                com.orion.store.morphe.store.JobStore.jobs.value
+                    .filter { it.params.packageName == p && (it.stage.isActive || it.stage == com.orion.store.morphe.model.JobStage.QUEUED) }
+                    .forEach { com.orion.store.morphe.worker.PatchJobRunner.cancel(it.id) }
+                com.orion.store.morphe.store.JobStore.deleteJobsForPackage(p)
+                com.orion.store.morphe.store.PatchedAppStore.removeApp(p)
+            }
+            var bytes = com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.name, pkg)
+            if (origPkg != pkg) bytes += com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.name, origPkg)
+            allPkgs.forEach { p ->
+                bytes += com.orion.store.platform.PatchStorageCleaner.purgeAppCache(ctx, p)
+                val precheck = java.io.File(ctx.cacheDir, "precheck_$p")
+                if (precheck.exists()) {
+                    bytes += precheck.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    precheck.deleteRecursively()
+                }
+            }
+            bytes += deleteMatchingDownloadsPatched(app.name, pkg)
+            bytes
+        }
+        val stillInstalled = withContext(Dispatchers.IO) { tracker.appInfo(pkg).installed }
+        if (!stillInstalled) {
+            set { st -> st.copy(installedVersions = st.installedVersions - app.id - pkg - origPkg) }
+        }
+        val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+        toast("Removed patched build" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+        haptic(H.SUCCESS)
+    }
+
+    /** Completely removes an app from My Apps and cleans ALL APKs (patched & untouched), patch data, queue jobs, and caches. */
+    fun deleteFromMyApps(app: AppItem, pkg: String) = viewModelScope.launch {
+        haptic(H.MEDIUM)
+        val origPkg = app.packageName?.takeIf { it.isNotBlank() } ?: pkg
+        if (app.id in d.activeDownloads) cancelDownload(app.id)
+
+        val freed = withContext(Dispatchers.IO) {
+            val allPkgs = setOf(pkg, origPkg, app.id).filter { it.isNotBlank() }
+            allPkgs.forEach { p ->
+                com.orion.store.morphe.store.JobStore.jobs.value
+                    .filter { it.params.packageName == p && (it.stage.isActive || it.stage == com.orion.store.morphe.model.JobStage.QUEUED) }
+                    .forEach { com.orion.store.morphe.worker.PatchJobRunner.cancel(it.id) }
+                com.orion.store.morphe.store.JobStore.deleteJobsForPackage(p)
+                com.orion.store.morphe.store.PatchedAppStore.removeApp(p)
+            }
+            var bytes = com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.name, pkg)
+            if (origPkg != pkg) bytes += com.orion.store.platform.OrionStorageManager.purgeAppStorage(app.name, origPkg)
+            allPkgs.forEach { p ->
+                bytes += com.orion.store.platform.PatchStorageCleaner.purgeAppCache(ctx, p)
+                val precheck = java.io.File(ctx.cacheDir, "precheck_$p")
+                if (precheck.exists()) {
+                    bytes += precheck.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+                    precheck.deleteRecursively()
+                }
+            }
+            listOfNotNull(d.readyToInstall[app.id], d.pendingCleanup[app.id]?.fileName, d.appLibrary[app.id]?.fileName)
+                .distinct()
+                .forEach { fileName ->
+                    val f = Downloads.file(fileName)
+                    if (f != null && f.exists()) bytes += f.length()
+                    runCatching { tracker.deleteFile(fileName) }
+                }
+            bytes += deleteMatchingDownloadsPatched(app.name, pkg)
+            bytes
+        }
+
+        val stillInstalled = withContext(Dispatchers.IO) {
+            tracker.appInfo(pkg).installed || (origPkg != pkg && tracker.appInfo(origPkg).installed)
+        }
+
+        upd { st ->
+            st.copy(
+                readyToInstall = st.readyToInstall - app.id,
+                pendingCleanup = st.pendingCleanup - app.id,
+                activeDownloads = st.activeDownloads - app.id,
+                persistedDownloads = st.persistedDownloads - app.id,
+                downloadProgress = st.downloadProgress - app.id,
+                downloadStatus = st.downloadStatus - app.id,
+                appLibrary = st.appLibrary - app.id
+            )
+        }
+        set { st ->
+            val keys = setOf(app.id, pkg, origPkg)
+            st.copy(
+                lastRemoteVersions = st.lastRemoteVersions - keys,
+                savedPatchSelections = st.savedPatchSelections - keys,
+                autoPatchApps = st.autoPatchApps - keys,
+                pinnedAppVersions = st.pinnedAppVersions - keys,
+                ignoredUpdates = st.ignoredUpdates - keys,
+                installedBuilds = st.installedBuilds - keys,
+                installSources = st.installSources - keys,
+                resolvedPackageNames = st.resolvedPackageNames - keys,
+                installedVersions = if (stillInstalled) st.installedVersions else st.installedVersions - keys,
+                appManage = if (stillInstalled) st.appManage + (app.id to false) else st.appManage - keys
+            )
+        }
+        val freedMb = String.format(java.util.Locale.US, "%.1f", freed / (1024f * 1024f))
+        toast("Deleted ${app.name} from My Apps" + if (freed > 0) " (freed ${freedMb}MB)" else "")
+        haptic(H.SUCCESS)
+    }
+
+    private fun deleteMatchingDownloadsPatched(appName: String, pkg: String): Long {
+        var bytes = 0L
+        runCatching {
+            val cleanApp = appName.replace(" ", "_")
+            Downloads.dir().listFiles()?.forEach { f ->
+                if (f.isFile && f.name.startsWith("Patched_", ignoreCase = true) && (
+                        f.name.contains(pkg, ignoreCase = true) ||
+                            f.name.contains(cleanApp, ignoreCase = true) ||
+                            f.name.contains(appName.filter { it.isLetterOrDigit() }, ignoreCase = true)
+                        )
+                ) {
+                    bytes += f.length()
+                    f.delete()
+                }
+            }
+        }
+        return bytes
     }
     // endregion
 

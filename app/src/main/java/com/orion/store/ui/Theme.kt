@@ -109,7 +109,7 @@ fun OrionTheme(s: Settings, content: @Composable () -> Unit) {
     val dyn = s.materialYouEnabled && Build.VERSION.SDK_INT >= 31
     // Theme objects are remembered: fresh instances on every Settings change re-ran the whole tree through these static locals.
     val colors = remember(theme, dyn, s.palette, s.customPalettes) {
-        if (!dyn) palette(s.palette, s.customPalettes).scheme(theme) else (if (theme == "light") dynamicLightColorScheme(ctx) else dynamicDarkColorScheme(ctx)).let {
+        if (!s.materialYouEnabled || Build.VERSION.SDK_INT < 31) palette(s.palette, s.customPalettes).scheme(theme) else (if (theme == "light") dynamicLightColorScheme(ctx) else dynamicDarkColorScheme(ctx)).let {
             when (theme) {
                 "oled" -> it.copy(background = Color.Black, surface = Color.Black, surfaceDim = Color.Black, surfaceContainerLowest = Color.Black, surfaceContainerLow = lerp(Color.Black, it.surfaceContainerLow, .5f))
                 "dusk" -> it.dusk()

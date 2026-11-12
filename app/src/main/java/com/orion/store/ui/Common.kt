@@ -244,7 +244,7 @@ enum class CardState { NONE, INSTALLED, UPDATE, DOWNLOADING, READY }
 @Composable
 fun cardState(app: AppItem): Pair<CardState, Float> {
     val s = LocalS.current; val d = LocalD.current
-    val local = s.installedVersions[app.id]
+    val local = s.installedVersions[app.id] ?: app.packageName?.let { s.installedVersions[it] }
     return when {
         app.id in d.activeDownloads -> CardState.DOWNLOADING to (d.downloadProgress[app.id] ?: 0f)
         app.id in d.readyToInstall -> CardState.READY to 1f

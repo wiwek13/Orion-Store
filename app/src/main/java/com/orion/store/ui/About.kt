@@ -319,7 +319,8 @@ fun DevTools(vm: MainViewModel) {
                     Row { Text("GitHub API Quota", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge); Text("$rem/$limit", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold) }
                     LinearProgressIndicator({ if (limit > 0) rem / limit.toFloat() else 0f }, Modifier.fillMaxWidth(), color = if (rem < limit * .2f) MaterialTheme.colorScheme.error else Safe)
                     Row { Text(if (s.githubToken.isNotEmpty()) "Authenticated" else "Public IP", Modifier.weight(1f), style = MaterialTheme.typography.labelSmall)
-                        Text("Resets: ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(reset * 1000))}", style = MaterialTheme.typography.labelSmall) }
+                        val resetLocale = androidx.compose.ui.platform.LocalConfiguration.current.locales.let { if (it.isEmpty) Locale.US else it[0] }
+                        Text("Resets: ${SimpleDateFormat("HH:mm", resetLocale).format(Date(reset * 1000))}", style = MaterialTheme.typography.labelSmall) }
                 }
             }
         }

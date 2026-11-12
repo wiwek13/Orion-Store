@@ -115,10 +115,53 @@ object KeyStoreManager {
 
     @Synchronized
     fun getKnownKeys(): List<SigningKeyInfo> {
-        if (knownKeys.isEmpty()) {
-            knownKeys.add(getActiveKeyInfo())
+        val list = mutableListOf<SigningKeyInfo>()
+        try {
+            val ks = loadKeyStore()
+            val aliases = ks.aliases()
+            while (aliases.hasMoreElements()) {
+                val alias = aliases.nextElement()
+                val cert = ks.getCertificate(alias) as? X509Certificate ?: continue
+                val sha256 = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                    .joinToString(":") { "%02X".format(it) }
+                list.add(
+                    SigningKeyInfo(
+                        alias = alias,
+                        algorithm = "RSA-2048",
+                        createdAt = cert.notBefore.time,
+                        isDefault = alias == DEFAULT_ALIAS,
+                        fingerprintSha256 = sha256,
+                        subject = cert.subjectX500Principal.name
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-        return knownKeys.toList()
+        if (list.isEmpty()) {
+            list.add(getActiveKeyInfo())
+        }
+        val merged = synchronized(knownKeys) {
+            val existingAliases = list.mapTo(HashSet()) { it.alias }
+            val extras = knownKeys.filter { it.alias !in existingAliases }
+            val combined = list + extras
+            knownKeys.clear()
+            knownKeys.addAll(combined)
+            combined.toList()
+        }
+        return merged
+    }
+
+    /**
+     * Lowercase uncolonized SHA-256 hex fingerprints of all certificates managed in this keystore.
+     */
+    @Synchronized
+    fun getKeySha256Fingerprints(): Set<String> {
+        return getKnownKeys()
+            .mapNotNull { info ->
+                info.fingerprintSha256.replace(":", "").trim().lowercase().takeIf { it.length == 64 }
+            }
+            .toSet()
     }
 
     fun generateKeyPair(alias: String): KeyPair {

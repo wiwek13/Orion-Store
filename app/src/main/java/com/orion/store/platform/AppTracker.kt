@@ -436,15 +436,25 @@ class AppTracker(private val ctx: Context) {
         return r
     }
 
+    // ACCESS_FINE_LOCATION is intentionally omitted from AndroidManifest.xml; API < 31 scanResults is gated by runtime checkSelfPermission.
+    @android.annotation.SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
     private fun encryption(wm: WifiManager?, wi: WifiInfo): String = runCatching {
         if (Build.VERSION.SDK_INT >= 31) when (wi.currentSecurityType) {
             WifiInfo.SECURITY_TYPE_SAE -> "WPA3"; WifiInfo.SECURITY_TYPE_OWE -> "OWE"
             WifiInfo.SECURITY_TYPE_EAP, WifiInfo.SECURITY_TYPE_EAP_WPA3_ENTERPRISE -> "WPA2-EAP"
             WifiInfo.SECURITY_TYPE_PSK -> "WPA2"; WifiInfo.SECURITY_TYPE_WEP -> "WEP"; WifiInfo.SECURITY_TYPE_OPEN -> "OPEN"; else -> "UNKNOWN"
-        } else wm?.scanResults?.firstOrNull { it.BSSID == wi.bssid }?.capabilities?.let {
-            when { "WPA3" in it -> "WPA3"; "WPA2" in it -> "WPA2"; "WPA" in it -> "WPA"; "WEP" in it -> "WEP"; else -> "OPEN" }
-        } ?: "UNKNOWN"
+        } else if (androidx.core.content.ContextCompat.checkSelfPermission(
+                ctx,
+                android.Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            wm?.scanResults?.firstOrNull { it.BSSID == wi.bssid }?.capabilities?.let {
+                when { "WPA3" in it -> "WPA3"; "WPA2" in it -> "WPA2"; "WPA" in it -> "WPA"; "WEP" in it -> "WEP"; else -> "OPEN" }
+            } ?: "UNKNOWN"
+        } else {
+            "UNKNOWN"
+        }
     }.getOrDefault("UNKNOWN")
 
     fun deleteFile(name: String) { val f = Downloads.file(name) ?: throw NativeError("INVALID_FILE_NAME"); Downloads.io { f.delete() } }

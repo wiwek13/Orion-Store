@@ -258,6 +258,7 @@
         <receiver android:name=".platform.AdbPairReceiver" android:exported="false" />
         <service android:name=".AutoUpdateJob" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
         <service android:name=".morphe.worker.AutoPatchJobService" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name=".morphe.engine.MorphePatcherService" android:process=":patcher" android:exported="false" />
         <receiver android:name=".InstallReceiver" android:exported="false" />
         <provider
             android:name="androidx.core.content.FileProvider"
